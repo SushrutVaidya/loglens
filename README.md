@@ -79,9 +79,13 @@ Five errors, three actual problems, and the minute to point `--trace` at. Drop
 Requires JDK 21+ to build.
 
 ```bash
-mvn package
+mvn package                      # runs the test suite, then builds the jar
 java -jar target/loglens.jar app.log
 ```
+
+Run the tests alone with `mvn test` - 44 cases covering every supported format,
+the fall-through guards that stop one parser stealing another's lines, and the
+message-template grouping that `--stats` depends on.
 
 ### Native binary (no JVM startup lag)
 
@@ -125,4 +129,4 @@ loglens -w service=auth -l WARN --trace 7b0e-c3 app.log
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache License 2.0 - see [LICENSE](LICENSE).

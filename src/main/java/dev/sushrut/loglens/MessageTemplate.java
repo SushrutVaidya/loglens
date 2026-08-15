@@ -48,9 +48,12 @@ final class MessageTemplate {
         // distinct problem.
         new Rule(Pattern.compile("'[^']{0,80}'"), "'<str>'"),
         new Rule(Pattern.compile("\"[^\"]{0,80}\""), "\"<str>\""),
-        // Null-ish sentinels vary between otherwise-identical messages
-        // ("resource_version: 0" vs "resource_version: None") and would
-        // otherwise split one recurring event into two findings.
+        // Normalise the many spellings of "no value" so services that disagree
+        // (None / null / nil / NULL) still group with each other.
+        // Note this deliberately does NOT group with <num>: "queue depth: 0" and
+        // "queue depth: None" mean different things, and conflating every number
+        // with every null to merge one recurring Airflow event would over-collapse
+        // templates everywhere else.
         new Rule(Pattern.compile("\\b(?:None|null|nil|NULL)\\b"), "<null>"),
         // Numbers last, so every rule above gets first refusal on its digits.
         // No trailing \b: durations and sizes carry unit suffixes ("30012ms",

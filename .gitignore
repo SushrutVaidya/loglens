@@ -6,3 +6,5 @@ libs/
 .idea/
 *.iml
 .vscode/
+out-test/
+libs-test/

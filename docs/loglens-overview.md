@@ -2,7 +2,7 @@
 
 **One line:** pipe any structured log stream in, get a scannable, filterable view out. No agent, no backend, no schema, no changes to your application.
 
-MIT licensed · Java 21+ · single binary or jar · reads stdin or a file
+Apache 2.0 licensed · Java 21+ · single binary or jar · reads stdin or a file
 
 ---
 

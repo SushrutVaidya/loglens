@@ -293,11 +293,20 @@ Targets are per-platform (macOS arm64, Linux x64, Windows x64) and belong in CI,
 
 | Gap | Consequence |
 |---|---|
-| **No tests** | The template regex bug in §4.3 shipped and was caught by luck. The parser and collapser are the two highest-risk surfaces and both are untested. |
-| No CI | Nothing verifies the build, and no release binaries are produced. |
+| No CI | 44 tests exist but nothing runs them automatically, and no release binaries are produced. |
 | Airflow format unsupported | The author's primary daily log source still renders as `PLAIN`. |
 | No time filtering | `--since 10m` requires piping through `awk` today. |
 | Timestamps are strings | Never parsed into an instant, so time filtering and cross-source ordering are not currently possible. |
 | Old `cmd.exe` colour | Escape codes emitted where `System.console()` is non-null but ANSI is unsupported. Modern Windows Terminal and PowerShell 7 are fine. |
 
-Ordering by risk, tests come first: a parsing tool relied on during an incident must not silently misclassify, and §4.3 is proof that it can.
+§10 previously led with "no tests". That gap is closed: 44 JUnit tests cover the
+parser (one per format, plus the fall-through guards), the template collapser
+(grouping equivalence, not just placeholder spelling), and Level's ordering.
+Every bug recorded in this document now has a regression test pinning it.
+
+Writing them immediately paid for itself - the suite caught a wrong assertion
+about number/null grouping, which turned out to be a misleading code comment
+rather than a code defect. See MessageTemplateTest.numberAndNullDoNotGroup for
+the reasoning and the accepted cost.
+
+Ordering by risk, CI now comes first: the tests exist but nothing enforces them.
