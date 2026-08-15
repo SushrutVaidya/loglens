@@ -8,6 +8,7 @@ import picocli.CommandLine.Parameters;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -17,33 +18,33 @@ import java.util.Map;
 import java.util.concurrent.Callable;
 
 /**
- * loglens — make structured JSON logs readable.
+ * loglens — readable logs in the terminal.
  *
- * Reads JSON-lines logs from a file or stdin, and prints one scannable coloured
- * line per entry instead of a wall of braces. Built around a workflow the
- * author hit repeatedly running a Spring Boot service: correlate one request
- * across many log lines by its X-Request-Id.
+ * Reads JSON, logfmt or klog logs from a file or stdin and prints one scannable
+ * coloured line per entry instead of a wall of braces. Built around a workflow
+ * that recurs constantly when operating a service: correlate one request across
+ * many log lines by its request id.
  *
- * Streaming by design — it reads line by line and never holds the whole log in
- * memory, so the idiomatic live-follow is a pipe:
+ * Streaming by design — reads line by line and never holds the log in memory, so
+ * the idiomatic live-follow is a pipe:
  *
- *     tail -f app.log | loglens --trace 9f2c-...
+ *     kubectl logs -f mypod | loglens --trace 9f2c-a1
  *
- * Exit codes: 0 normal, 1 on I/O error (matches grep-family conventions).
+ * Exit codes: 0 normal, 1 on I/O error (matching the grep family).
  */
 @Command(
     name = "loglens",
     mixinStandardHelpOptions = true,
-    version = "loglens 0.1.0",
+    version = "loglens 0.2.0",
     sortOptions = false,
-    description = "Pretty-print, filter, and trace structured JSON logs."
+    description = "Pretty-print, filter, trace and summarise structured logs."
 )
 public final class LogLens implements Callable<Integer> {
 
     @Parameters(
         arity = "0..1",
         paramLabel = "FILE",
-        description = "Log file to read. Omit to read stdin (e.g. `tail -f app.log | loglens`)."
+        description = "Log file to read. Omit to read stdin (e.g. `kubectl logs -f pod | loglens`)."
     )
     private Path file;
 
@@ -83,6 +84,19 @@ public final class LogLens implements Callable<Integer> {
     )
     private String grep;
 
+    @Option(
+        names = {"-s", "--stats"},
+        description = "Print a triage summary: counts by level and source, distinct "
+            + "problems with occurrence counts, and when errors peaked."
+    )
+    private boolean stats;
+
+    @Option(
+        names = "--quiet",
+        description = "With --stats, suppress the log lines and print only the summary."
+    )
+    private boolean quiet;
+
     @Option(names = "--color", negatable = true, description = "Force colour on/off (default: auto).")
     private Boolean color;
 
@@ -90,25 +104,57 @@ public final class LogLens implements Callable<Integer> {
     public Integer call() {
         Ansi ansi = Ansi.resolve(color);
         LogParser parser = new LogParser(traceField);
-        LogRenderer renderer = new LogRenderer(ansi, trace);
         String needle = grep == null ? null : grep.toLowerCase();
+        StatsCollector collector = stats ? new StatsCollector() : null;
+        boolean printLines = !(stats && quiet);
 
-        // autoFlush=true so a piped `tail -f` shows lines as they arrive rather
-        // than only when the buffer fills.
+        // autoFlush so a piped `kubectl logs -f` shows lines as they arrive
+        // rather than only when the buffer fills.
         PrintWriter out = new PrintWriter(
-            new java.io.OutputStreamWriter(System.out, StandardCharsets.UTF_8), true);
+            new OutputStreamWriter(System.out, StandardCharsets.UTF_8), true);
+
+        // Whether the most recent real entry survived filtering. Continuation
+        // lines inherit that decision — see keep().
+        boolean lastEntryKept = false;
+        // Source tags only earn their space once a stream carries more than one.
+        String firstSource = null;
+        boolean multiSource = false;
 
         try (BufferedReader reader = openReader()) {
             String line;
             while ((line = reader.readLine()) != null) {
                 LogEntry entry = parser.parse(line);
-                if (keep(entry, needle)) {
-                    out.println(renderer.render(entry));
+
+                if (entry.source != null) {
+                    if (firstSource == null) firstSource = entry.source;
+                    else if (!multiSource && !firstSource.equals(entry.source)) multiSource = true;
+                }
+
+                if (collector != null) collector.add(entry);
+
+                boolean keep;
+                if (entry.kind == LogEntry.Kind.CONTINUATION) {
+                    // A stack frame belongs to the entry above it. Judging it on
+                    // its own dropped stack traces out of --trace output, which
+                    // is exactly the context you want when tracing a failure.
+                    keep = lastEntryKept;
+                } else {
+                    keep = keep(entry, needle);
+                    lastEntryKept = keep;
+                }
+
+                if (keep && printLines) {
+                    out.println(new LogRenderer(ansi, trace, multiSource).render(entry));
                 }
             }
         } catch (IOException io) {
             System.err.println("loglens: " + io.getMessage());
             return 1;
+        }
+
+        if (collector != null && !collector.isEmpty()) {
+            out.print(collector.render(ansi));
+            out.flush();
         }
         return 0;
     }
@@ -125,16 +171,14 @@ public final class LogLens implements Callable<Integer> {
         if (needle != null && !e.raw.toLowerCase().contains(needle)) {
             return false;
         }
-        // A trace filter means "only this request". A non-JSON line has no
-        // correlation id and can never match, so this drops context lines too.
+        // A trace filter means "only this request", which an unstructured line
+        // can never satisfy on its own.
         if (trace != null && !trace.equals(e.requestId)) {
             return false;
         }
-        // Level and field filters only make sense on parsed lines. A non-JSON
-        // line (stack trace, banner) is kept as context ONLY when no structured
-        // filter is active — once you ask for a specific level or field, a line
-        // with no fields can't satisfy it, so it drops, same as --trace does.
-        if (!e.json) {
+        // Level and field filters need fields. An unparseable line is kept as
+        // context only while no structured filter is active.
+        if (!e.structured()) {
             return minLevel == null && where.isEmpty();
         }
         if (minLevel != null && e.level.compareTo(minLevel) < 0 && e.level != Level.UNKNOWN) {
@@ -142,6 +186,11 @@ public final class LogLens implements Callable<Integer> {
         }
         for (Map.Entry<String, String> w : where.entrySet()) {
             Object actual = e.extras.get(w.getKey());
+            // Fall back to source so `--where service=x` also matches a
+            // kubectl/compose prefix, not just a logged field.
+            if (actual == null && w.getKey().equals("service") && e.source != null) {
+                actual = e.source;
+            }
             if (actual == null || !actual.toString().equals(w.getValue())) {
                 return false;
             }
@@ -150,8 +199,6 @@ public final class LogLens implements Callable<Integer> {
     }
 
     public static void main(String[] args) {
-        // Filters are the tool's job, not a reason to error — but a bad flag or
-        // unreadable file should still exit non-zero for scripts.
         int exit = new CommandLine(new LogLens())
             .setCaseInsensitiveEnumValuesAllowed(true)
             .execute(args);
