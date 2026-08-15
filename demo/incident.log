@@ -1,0 +1,14 @@
+{"timestamp":"2026-08-15T10:22:01.101Z","level":"INFO","logger":"c.s.api.StatsController","requestId":"9f2c-a1","message":"GET /api/stats","service":"api","pod":"api-7d9f-x4k2"}
+{"timestamp":"2026-08-15T10:22:01.118Z","level":"DEBUG","logger":"c.s.api.StatsService","requestId":"9f2c-a1","message":"cache miss, querying db","service":"api","key":"stats:latest"}
+{"timestamp":"2026-08-15T10:24:10.402Z","level":"WARN","logger":"com.zaxxer.hikari.pool.HikariPool","requestId":"9f2c-a1","message":"HikariPool-1 - Connection is not available, request timed out after 30000ms","service":"api","activeConnections":10,"idleConnections":0}
+{"timestamp":"2026-08-15T10:24:10.489Z","level":"ERROR","logger":"c.s.api.GlobalExceptionHandler","requestId":"9f2c-a1","message":"Connection to 10.0.3.14:5432 timed out after 30012ms","service":"api","status":500}
+	at com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:696)
+	at org.springframework.jdbc.datasource.DataSourceUtils.fetchConnection(DataSourceUtils.java:159)
+{"timestamp":"2026-08-15T10:24:11.003Z","level":"ERROR","logger":"c.s.api.GlobalExceptionHandler","requestId":"3e81-b7","message":"Connection to 10.0.7.82:5432 timed out after 29984ms","service":"api","status":500}
+{"timestamp":"2026-08-15T10:24:12.771Z","level":"ERROR","logger":"c.s.api.GlobalExceptionHandler","requestId":"c0d4-e2","message":"Connection to 10.0.3.14:5432 timed out after 30001ms","service":"api","status":500}
+{"timestamp":"2026-08-15T10:24:13.882Z","level":"ERROR","logger":"c.s.api.GlobalExceptionHandler","requestId":"aa12-f4","message":"Connection to 10.0.7.82:5432 timed out after 30044ms","service":"api","status":500}
+level=warn ts=2026-08-15T10:24:15.100Z msg="upstream connection refused" service=nginx-ingress upstream=10.0.3.14:8080
+level=error ts=2026-08-15T10:24:16.220Z msg="upstream connection refused" service=nginx-ingress upstream=10.0.7.82:8080
+E0815 10:24:17.001456    1 kubelet.go:1893] Failed to sync pod err="context deadline exceeded"
+{"timestamp":"2026-08-15T10:24:52.010Z","level":"INFO","logger":"com.zaxxer.hikari.pool.HikariPool","message":"HikariPool-1 - Added connection org.postgresql.jdbc.PgConnection@4f2a","service":"api"}
+{"timestamp":"2026-08-15T10:24:52.115Z","level":"INFO","logger":"c.s.api.StatsController","requestId":"9f2c-a1","message":"200 OK","service":"api","status":200,"durationMs":171014}

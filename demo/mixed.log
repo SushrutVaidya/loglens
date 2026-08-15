@@ -1,0 +1,7 @@
+26/08/15 09:00:49 INFO DAGScheduler: Job 0 finished: collect at Main.scala:24
+2026-08-15 09:00:51,306 ERROR org.apache.hadoop.hdfs.DataStreamer: Exception in createBlockOutputStream
+[2026-08-15 09:00:53,306] INFO [GroupCoordinator 1]: Preparing to rebalance group
+[2026-08-15T09:00:55.306661Z +0000] WARNING - Watch died gracefully, restarting
+E0815 09:00:57.001456    1 kubelet.go:1893] Failed to sync pod
+level=info ts=2026-08-15T09:00:58.306Z caller=main.go:123 msg="Server is ready"
+{"timestamp":"2026-08-15T09:00:59Z","level":"ERROR","message":"payment declined","service":"billing"}

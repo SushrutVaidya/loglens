@@ -1,0 +1,5 @@
+#!/bin/sh
+# Demo wrapper: keeps the recorded command line short and readable.
+# Real installs use `java -jar target/loglens.jar` or the native binary.
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+exec java -cp "$ROOT/out:$ROOT/libs/*" dev.sushrut.loglens.LogLens "$@"

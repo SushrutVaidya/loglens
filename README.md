@@ -1,13 +1,14 @@
 # loglens
 
-Make structured JSON logs readable. Pretty-print, filter, and follow one
-request across lines — from the terminal, with no config.
+Readable logs in the terminal. Pretty-print, filter, trace and summarise
+structured logs - JSON, logfmt, klog, Spark, Hadoop, Kafka, Airflow - with no
+agent, no backend, and no changes to the application producing them.
 
 ```
-tail -f app.log | loglens --trace 9f2c-a1
+kubectl logs -f mypod | loglens --trace 9f2c-a1
 ```
 
-Structured (JSON-lines) logging is great for machines and miserable for humans:
+Structured logging is excellent for machines and hostile to humans:
 
 ```
 {"timestamp":"2026-08-15T10:22:03.010Z","level":"error","trace_id":"7b0e-c3","message":"query failed: timeout","sql":"SELECT ..."}
@@ -18,6 +19,8 @@ Structured (JSON-lines) logging is great for machines and miserable for humans:
 ```
 10:22:03  ERROR  query failed: timeout  req=7b0e-c3  sql=SELECT ...
 ```
+
+![loglens triaging an incident](docs/img/stats.gif)
 
 ## Why
 
@@ -42,28 +45,31 @@ workflow as one flag.
 
 ## Triage an incident in one command
 
-```
-$ kubectl logs backend-7d9f-x4k2 | loglens --stats --quiet
+`--stats` answers the question you actually have at 3am - not "show me the lines"
+but "what is the shape of this". Near-identical messages collapse by template, so
+eight errors become three real problems rather than eight rows to read.
 
-9 lines  ·  10:22:01 → 10:24:52
-ERROR 5   WARN 1   INFO 3
+Drop `--quiet` to get the summary after the log lines instead of replacing them.
 
-by source
-  backend-7d9f-x4k2                      5
-  nginx-ingress                          2
+## Follow one request end to end
 
-distinct problems (warn and above)
-       3× ERROR  Connection to 10.0.3.14:5432 timed out after 30012ms
-       2× ERROR  upstream connection refused
-       1× ERROR  Failed to sync pod
+![following one request with --trace](docs/img/trace.gif)
 
-errors peaked at 10:24 (5 in that minute)
-```
+Given a correlation id, `--trace` shows only that request's journey - and keeps
+the stack traces attached to the errors they belong to. Five lines, and the whole
+incident is legible: cache miss, pool exhausted, 30s timeout, 500, then a 200
+after 171 seconds.
 
-Five errors, three actual problems, and the minute to point `--trace` at. Drop
-`--quiet` to get the summary after the log lines.
+It auto-detects the usual correlation fields (`requestId`, `X-Request-Id`,
+`traceId`, `trace_id`, `correlationId`, ...), so it works without configuration.
 
 ## Format support
+
+![one stream, seven formats](docs/img/multiformat.gif)
+
+A real `kubectl logs` is not one tidy format - it is your service's JSON next to
+the control plane's klog next to the ingress controller's logfmt. All of it
+renders in the same shape, interleaved, in one pass.
 
 | Format | Status |
 |---|---|
