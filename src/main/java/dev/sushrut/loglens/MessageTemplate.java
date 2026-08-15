@@ -48,6 +48,10 @@ final class MessageTemplate {
         // distinct problem.
         new Rule(Pattern.compile("'[^']{0,80}'"), "'<str>'"),
         new Rule(Pattern.compile("\"[^\"]{0,80}\""), "\"<str>\""),
+        // Null-ish sentinels vary between otherwise-identical messages
+        // ("resource_version: 0" vs "resource_version: None") and would
+        // otherwise split one recurring event into two findings.
+        new Rule(Pattern.compile("\\b(?:None|null|nil|NULL)\\b"), "<null>"),
         // Numbers last, so every rule above gets first refusal on its digits.
         // No trailing \b: durations and sizes carry unit suffixes ("30012ms",
         // "512MiB") and \b fails between a digit and a letter, which left the

@@ -35,8 +35,12 @@ final class LogParser {
     private static final List<String> MSG_KEYS =
         List.of("message", "msg", "@message", "text", "event");
 
-    // kubectl --prefix emits "[pod/backend-abc/container] ..."
-    private static final Pattern KUBECTL_PREFIX = Pattern.compile("^\\[([^\\]]+)]\\s+(.*)$");
+    // kubectl --prefix emits "[pod/backend-abc/container] ...". No whitespace
+    // allowed inside the bracket, and a leading date is rejected below: Airflow
+    // opens every line with "[2026-08-15T09:00:49.306661Z +0000]", which a looser
+    // pattern happily mistook for a pod name.
+    private static final Pattern KUBECTL_PREFIX = Pattern.compile("^\\[([^\\]\\s]+)]\\s+(.*)$");
+    private static final Pattern LOOKS_LIKE_DATE = Pattern.compile("^\\d{4}-\\d{2}-\\d{2}");
     // docker compose emits "backend-1  | ...". The pipe is the signal; requiring
     // it avoids swallowing the first word of ordinary prose.
     private static final Pattern COMPOSE_PREFIX = Pattern.compile("^(\\S+)\\s*\\|\\s(.*)$");
@@ -46,6 +50,48 @@ final class LogParser {
     private static final Pattern CONTINUATION_TEXT = Pattern.compile(
         "^(at\\s+\\S|Caused by:|Suppressed:|\\.{3}\\s*\\d+\\s+more|"
         + "[\\w.$]+(Exception|Error|Throwable)(:|\\s|$))");
+
+    // Airflow: "[2026-08-15T09:00:49.306661Z +0000] INFO - message" (scheduler,
+    // triggerer) and "[ts] {taskinstance.py:1234} INFO - message" (task logs).
+    // The {file:line} group is optional because only task logs include it.
+    private static final Pattern AIRFLOW = Pattern.compile(
+        "^\\[(\\d{4}-\\d{2}-\\d{2}T[\\d:.]+(?:Z|[+-]\\d{2}:?\\d{2})?)\\s*(?:[+-]\\d{4})?]\\s+"
+        + "(?:\\{([^}]+)}\\s+)?([A-Z]+)\\s+-\\s?(.*)$");
+
+    // log4j family - Spark, Hadoop, Kafka, Hive, Flink, HBase, ZooKeeper.
+    // Three timestamp dialects, an optional [thread] or [context], and an
+    // optional "logger:" prefix on the message.
+    //   Spark   : 26/08/15 09:00:49 INFO SparkContext: msg
+    //   Hadoop  : 2026-08-15 09:00:49,306 INFO org.apache.hadoop.X: msg
+    //   log4j2  : 2026-08-15 09:00:49,306 INFO [main] o.a.s.Foo: msg
+    private static final Pattern LOG4J = Pattern.compile(
+        "^(\\d{2,4}[/-]\\d{2}[/-]\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?)\\s+"
+        + "([A-Z]{4,8})\\s+"
+        + "(?:\\[([^\\]]{1,60})]\\s+)?"
+        + "(?:([\\w.$]{2,80}):\\s)?"
+        + "(.*)$");
+
+    // Kafka wraps the timestamp in brackets: [2026-08-15 09:00:49,306] INFO msg
+    private static final Pattern LOG4J_BRACKETED = Pattern.compile(
+        "^\\[(\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?)]\\s+"
+        + "([A-Z]{4,8})\\s+(.*)$");
+
+    // Python's logging default: ts - logger - LEVEL - message
+    private static final Pattern PYTHON_LOGGING = Pattern.compile(
+        "^(\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?)\\s+-\\s+"
+        + "([\\w.]{1,60})\\s+-\\s+([A-Z]{4,8})\\s+-\\s?(.*)$");
+
+    // Generic last resort: a timestamp-shaped token at the start, then a level
+    // token somewhere in the next few fields. Deliberately imprecise - it will
+    // not separate logger from thread - but it renders and filters correctly on
+    // formats neither the author nor this file has seen. Tried only after every
+    // specific parser has declined.
+    private static final Pattern GENERIC_TS = Pattern.compile(
+        "^\\[?(\\d{2,4}[/-]\\d{2}[/-]\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?Z?"
+        + "(?:\\s*[+-]\\d{2}:?\\d{2})?)]?\\s+(.*)$");
+    private static final Pattern GENERIC_LEVEL = Pattern.compile(
+        "\\b(TRACE|DEBUG|INFO|INFORMATION|NOTICE|WARN|WARNING|ERROR|SEVERE|FATAL|CRITICAL)\\b",
+        Pattern.CASE_INSENSITIVE);
 
     // klog: I0815 10:22:01.101234   1 controller.go:123] message
     private static final Pattern KLOG = Pattern.compile(
@@ -84,8 +130,14 @@ final class LogParser {
         }
 
         LogEntry entry = tryJson(rest);
+        if (entry == null) entry = tryAirflow(rest);
         if (entry == null) entry = tryKlog(rest);
+        if (entry == null) entry = tryPythonLogging(rest);
+        if (entry == null) entry = tryLog4j(rest);
         if (entry == null) entry = tryLogfmt(rest);
+        // Generic heuristic runs last: it is the most permissive matcher here,
+        // so anything it could wrongly claim must get first refusal above.
+        if (entry == null) entry = tryGeneric(rest);
 
         if (entry != null) return entry.withSource(source);
         return LogEntry.plain(line);
@@ -109,7 +161,7 @@ final class LogParser {
     /** @return [source|null, remainder]; remainder is the original line if no prefix matched. */
     private static String[] stripPrefix(String line) {
         Matcher k = KUBECTL_PREFIX.matcher(line);
-        if (k.matches()) {
+        if (k.matches() && !LOOKS_LIKE_DATE.matcher(k.group(1)).find()) {
             // "pod/backend-abc/container" — keep the pod name, the useful part.
             String tag = k.group(1);
             String[] parts = tag.split("/");
@@ -139,6 +191,82 @@ final class LogParser {
         Map<String, Object> extras = new LinkedHashMap<>();
         root.properties().forEach(e -> extras.put(e.getKey(), scalarOrNode(e.getValue())));
         return build(LogEntry.Kind.JSON, rest, extras);
+    }
+
+    // ---- Airflow ------------------------------------------------------------
+
+    private LogEntry tryAirflow(String rest) {
+        Matcher m = AIRFLOW.matcher(rest.strip());
+        if (!m.matches()) return null;
+
+        Map<String, Object> extras = new LinkedHashMap<>();
+        // Task logs identify the emitting source as {file.py:line}; keep it as a
+        // field rather than leaving it embedded in the message.
+        if (m.group(2) != null) extras.put("at", m.group(2));
+
+        // Airflow appends nothing structured after the message, so the whole
+        // remainder is the message.
+        String message = m.group(4);
+        String requestId = takeFirst(extras, requestIdKeys);
+
+        return LogEntry.structured(LogEntry.Kind.AIRFLOW, rest, m.group(1),
+            Level.from(m.group(3)), message, requestId, extras);
+    }
+
+    // ---- log4j family (Spark / Hadoop / Kafka / Flink / Hive) ---------------
+
+    private LogEntry tryLog4j(String rest) {
+        String line = rest.strip();
+
+        Matcher b = LOG4J_BRACKETED.matcher(line);
+        if (b.matches()) {
+            return logEntry(rest, b.group(1), b.group(2), null, null, b.group(3));
+        }
+
+        Matcher m = LOG4J.matcher(line);
+        if (!m.matches()) return null;
+        // group 3 = [thread] or [context], group 4 = logger, group 5 = message
+        return logEntry(rest, m.group(1), m.group(2), m.group(3), m.group(4), m.group(5));
+    }
+
+    private LogEntry tryPythonLogging(String rest) {
+        Matcher m = PYTHON_LOGGING.matcher(rest.strip());
+        if (!m.matches()) return null;
+        return logEntry(rest, m.group(1), m.group(3), null, m.group(2), m.group(4));
+    }
+
+    /**
+     * Last-resort parser: timestamp at the start plus a level token nearby.
+     *
+     * Only the level token is removed from the message; the rest is left intact
+     * rather than guessed at, because inventing structure we cannot verify is
+     * worse than showing the line as its author wrote it.
+     */
+    private LogEntry tryGeneric(String rest) {
+        Matcher ts = GENERIC_TS.matcher(rest.strip());
+        if (!ts.matches()) return null;
+
+        String remainder = ts.group(2);
+        Matcher lv = GENERIC_LEVEL.matcher(remainder);
+        // Require the level in the first stretch of the line: a "WARNING" buried
+        // in prose 200 chars in is part of the message, not a severity field.
+        if (!lv.find() || lv.start() > 40) return null;
+
+        String message = (remainder.substring(0, lv.start()) + remainder.substring(lv.end())).strip();
+        // Tidy the separators log formats leave behind once the level is removed.
+        message = message.replaceFirst("^[\\[\\]\\-:|\\s]+", "").strip();
+
+        return logEntry(rest, ts.group(1), lv.group(1), null, null, message);
+    }
+
+    /** Shared construction for the positional (non key/value) formats. */
+    private LogEntry logEntry(String raw, String timestamp, String level,
+                              String thread, String logger, String message) {
+        Map<String, Object> extras = new LinkedHashMap<>();
+        if (thread != null && !thread.isBlank()) extras.put("thread", thread);
+        if (logger != null && !logger.isBlank()) extras.put("logger", logger);
+        return LogEntry.structured(LogEntry.Kind.LOG4J, raw, timestamp,
+            Level.from(level), message, null, extras);
     }
 
     // ---- klog ---------------------------------------------------------------

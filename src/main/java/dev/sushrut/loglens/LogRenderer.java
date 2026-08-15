@@ -1,6 +1,8 @@
 package dev.sushrut.loglens;
 
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Renders a {@link LogEntry} to a single coloured line:
@@ -80,15 +82,22 @@ final class LogRenderer {
     }
 
     /**
-     * Trims an ISO-8601 timestamp to HH:mm:ss — the date is rarely what you're
-     * reading logs for. Anything that doesn't look like ISO passes through
-     * untouched rather than being mangled (klog already gives HH:mm:ss).
+     * Reduces any recognised timestamp dialect to HH:mm:ss.
+     *
+     * Column alignment is the point of this renderer, and the formats in play
+     * disagree wildly on width: ISO-8601 with a T, Hadoop's "2026-08-15
+     * 09:00:51,306", Spark's two-digit "26/08/15 09:00:49", nginx's
+     * "2026/08/15 09:00:57". Rather than enumerate dialects, pull out the
+     * wall-clock time, which every one of them contains and which is the only
+     * part worth reading in a log you are actively watching.
+     *
+     * Anything with no HH:mm:ss is passed through untouched rather than
+     * mangled - better an odd-width column than a wrong time.
      */
+    private static final Pattern CLOCK = Pattern.compile("\\d{2}:\\d{2}:\\d{2}");
+
     private static String shortTime(String ts) {
-        int t = ts.indexOf('T');
-        if (t >= 0 && ts.length() >= t + 9) {
-            return ts.substring(t + 1, t + 9);
-        }
-        return ts;
+        Matcher m = CLOCK.matcher(ts);
+        return m.find() ? m.group() : ts;
     }
 }

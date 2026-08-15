@@ -21,6 +21,9 @@ final class LogEntry {
         JSON,
         KLOG,
         LOGFMT,
+        AIRFLOW,
+        /** log4j family: Spark, Hadoop, Kafka, Flink, plus the generic fallback. */
+        LOG4J,
         /** Indented / "at ..." / "Caused by:" — belongs to the entry above it. */
         CONTINUATION,
         /** Nothing matched; render verbatim. */
@@ -49,7 +52,9 @@ final class LogEntry {
     }
 
     boolean structured() {
-        return kind == Kind.JSON || kind == Kind.KLOG || kind == Kind.LOGFMT;
+        return kind == Kind.JSON || kind == Kind.KLOG
+            || kind == Kind.LOGFMT || kind == Kind.AIRFLOW
+            || kind == Kind.LOG4J;
     }
 
     static LogEntry plain(String raw) {
