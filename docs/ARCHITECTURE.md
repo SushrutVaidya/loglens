@@ -1,60 +1,63 @@
-# loglens — Architecture
+# loglens — architecture
 
-**Scope.** 991 lines of Java across 8 classes, two runtime dependencies. This document covers the data flow, each component's contract, the three non-obvious algorithms, and the decisions that constrain future work.
+Notes on how loglens is put together: the data flow, what each class does, the
+handful of algorithms that aren't obvious from the code, and the decisions that
+constrain where it can go next.
 
-**Version.** 0.2.0 · Java 21 target · Picocli 4.7.6 · Jackson Databind 2.18.2
+Version 0.2.0, targets Java 21, two runtime dependencies (Picocli and Jackson).
 
----
+## What it is
 
-## 1. What it is
+A read-only, streaming log formatter. It reads lines from stdin or a file, works
+out what format each line is in, normalises it, filters, renders, and optionally
+builds a triage summary at the end.
 
-A read-only, streaming log formatter. It consumes lines from stdin or a file, classifies each into a normalised entry, filters, renders, and optionally accumulates a triage summary.
-
-It is a **pipe citizen**: no daemon, no network, no state on disk, no library to embed in the application being observed. The unit of composition is a Unix pipe.
+No daemon, no network, nothing written to disk, nothing to embed in the app you're
+watching. It's built to live in a pipe:
 
 ```
 kubectl logs -f pod | loglens --trace 9f2c-a1
 ```
 
-### Non-goals, and why
+Things it deliberately doesn't do, and why:
 
-| Not implemented | Reason |
-|---|---|
-| Log collection / tailing | `kubectl logs -f`, `stern` and `tail -f` already do this. Owning it means owning Kubernetes auth, pod discovery and reconnection — a different product. |
-| Storage or indexing | That is Loki/Splunk. Competing on retrieval loses; the niche is *no infrastructure available*. |
-| A TUI | Terminal output composes with pipes; a full-screen UI does not. Also weak library support on the JVM. |
-| Writing to the log source | Read-only is a hard invariant. Nothing here can mutate what it observes. |
+- **Collect or tail logs.** `kubectl logs -f`, `stern` and `tail -f` already do
+  that well. Owning it would mean owning pod discovery, auth and reconnection,
+  which is a different tool.
+- **Store or index.** That's what Loki and Splunk are for. The whole point of
+  loglens is the case where none of that is set up.
+- **Run a full-screen TUI.** Output that composes with pipes was the goal; a TUI
+  fights that.
+- **Write back to the source.** Read-only is a hard rule.
 
----
+## Data flow
 
-## 2. Data flow
-
-Single pass, one line at a time, no buffering of the stream.
+One pass, one line at a time, nothing buffered.
 
 ```
                 stdin / FILE
                      │
                      ▼
         ┌────────────────────────┐
-        │  LogParser.parse()     │   per line, no shared mutable state
+        │  LogParser.parse()     │   per line, no shared state
         │                        │
-        │  1. strip prefix   ────┼──►  source = pod / container
-        │  2. continuation?  ────┼──►  Kind.CONTINUATION (early return)
-        │  3. try JSON           │
-        │  4. try klog           │
-        │  5. try logfmt         │
-        │  6. fall through   ────┼──►  Kind.PLAIN (verbatim)
+        │  strip prefix      ────┼──►  source = pod / container
+        │  continuation?     ────┼──►  Kind.CONTINUATION (early return)
+        │  JSON, Airflow, klog,  │
+        │  Python, log4j, logfmt │
+        │  generic ts+level  ────┼──►  first match wins
+        │  none of the above ────┼──►  Kind.PLAIN (verbatim)
         └───────────┬────────────┘
                     │  LogEntry
         ┌───────────┴────────────┐
         │                        │
         ▼                        ▼
 ┌───────────────┐      ┌──────────────────┐
-│ LogLens.keep()│      │ StatsCollector   │   sees EVERY entry,
-│  grep         │      │  .add()          │   pre-filter — a summary
-│  trace        │      │                  │   must describe the whole
-│  level        │      │  MessageTemplate │   stream, not the filtered
-│  where        │      │   .collapse()    │   subset
+│ LogLens.keep()│      │ StatsCollector   │   sees every entry, before
+│  grep         │      │  .add()          │   filtering, so the summary
+│  trace        │      │                  │   describes the whole stream
+│  level        │      │  MessageTemplate │   and not just what survived
+│  where        │      │   .collapse()    │
 └───────┬───────┘      └────────┬─────────┘
         │ kept                  │
         ▼                       │  at EOF
@@ -67,246 +70,284 @@ Single pass, one line at a time, no buffering of the stream.
                   stdout
 ```
 
-**Ordering guarantee.** Lines are emitted in input order. `--stats` output is appended after the final line, or replaces it entirely under `--quiet`.
+Lines come out in the order they went in. The `--stats` block prints once at the
+end, or on its own if you pass `--quiet`.
 
-**Why stats sees unfiltered entries.** A summary describing only what survived the filter would be misleading — "3 errors" when you asked for `--level ERROR` tells you nothing about the other 14,000 lines. `StatsCollector.add()` is therefore called before `keep()`.
+Note that stats runs *before* the filter. A summary that only counted the lines
+surviving `--level ERROR` would be useless ("3 errors" tells you nothing about the
+other 14,000 lines), so `StatsCollector.add()` is called ahead of `keep()`.
 
----
+## The classes
 
-## 3. Components
+Eight of them, each with one job.
 
-| Class | LOC | Responsibility |
-|---|---|---|
-| `LogLens` | 207 | Picocli command; owns the read loop, filter predicate, and continuation-inheritance state |
-| `LogParser` | 264 | Line → `LogEntry`. Prefix stripping, format detection, field normalisation |
-| `StatsCollector` | 192 | Streaming aggregation; renders the triage summary |
-| `LogRenderer` | 94 | `LogEntry` → one display line |
-| `MessageTemplate` | 74 | Collapses a message to a template so occurrences group |
-| `LogEntry` | 73 | Immutable parsed line. `Kind` discriminates JSON/KLOG/LOGFMT/CONTINUATION/PLAIN |
-| `Ansi` | 47 | Single authority on whether colour is enabled |
-| `Level` | 40 | Ordered severity enum + tolerant parsing |
+| Class | What it does |
+|---|---|
+| `LogLens` | The Picocli command. Owns the read loop, the filter check, and the one bit of continuation state. |
+| `LogParser` | Line to `LogEntry`: prefix stripping, format detection, field lifting. |
+| `LogEntry` | The normalised line. Immutable. Its `Kind` says how it was recognised. |
+| `Level` | Ordered severity enum plus tolerant parsing. |
+| `MessageTemplate` | Collapses a message to a template so repeats group together. |
+| `StatsCollector` | Streaming aggregation, and renders the summary. |
+| `LogRenderer` | `LogEntry` to one display line. |
+| `Ansi` | The single yes/no on colour, plus the wrap helpers. |
 
-### 3.1 `LogEntry` — the normalised shape
+### LogEntry
 
-Four well-known fields are lifted out; everything else is preserved.
+Four well-known fields get lifted out; everything else is kept as-is.
 
 ```java
-Kind kind;                  // JSON | KLOG | LOGFMT | CONTINUATION | PLAIN
+Kind kind;                  // JSON | KLOG | LOGFMT | AIRFLOW | LOG4J | CONTINUATION | PLAIN
 String raw;                 // original text, for verbatim rendering
 String source;              // pod/container from a prefix, else null
-String timestamp;           // as printed by the source
+String timestamp;           // as the source printed it
 Level level;
 String message;
 String requestId;
-Map<String,Object> extras;  // LinkedHashMap — source order preserved
+Map<String,Object> extras;  // LinkedHashMap, so field order is preserved
 ```
 
-Immutable, with one copy-on-write mutator (`withSource`). `extras` is a `LinkedHashMap` deliberately: field order in a log line carries author intent, and reordering it makes output harder to scan than the original.
+It's immutable, with one copy-on-write helper (`withSource`). `extras` is a
+`LinkedHashMap` on purpose: the order fields appear in a log line is something the
+author chose, and shuffling it makes the output harder to read than the original.
 
-**Nothing is discarded.** Unrecognised fields land in `extras`; unparseable lines keep `raw`. A formatter that silently drops data is not trustworthy during an incident.
+Nothing gets thrown away. Unknown fields go in `extras`, and a line no parser
+understood keeps its `raw` text. A formatter that silently drops data isn't much
+use mid-incident.
 
-### 3.2 `Level` — ordered, tolerant
+### Level
 
-Enum ordering *is* the comparison used by `--level`, so `--level WARN` is `level.compareTo(WARN) >= 0`.
+The enum's declared order *is* the comparison `--level` uses, so `--level WARN`
+means `level.compareTo(WARN) >= 0`.
 
-`UNKNOWN` is declared **first** (below `TRACE`) so an unrecognised level never outranks a real one. It is also explicitly exempted from level filtering — a line whose severity we failed to parse should not be hidden by a threshold it might well have exceeded.
+`UNKNOWN` is declared first, below `TRACE`, so a level we couldn't parse never
+outranks a real one. It's also skipped by the level filter on purpose: if we
+failed to read a line's severity, we shouldn't hide it behind a threshold it might
+have cleared anyway.
 
-`Level.from()` maps ~25 spellings (`WARNING`, `SEVERE`, `CRIT`, syslog numerics) and returns `UNKNOWN` rather than throwing. An unparseable level is data, not an error.
+`Level.from()` handles the spellings real loggers use (`WARNING`, `SEVERE`,
+`CRIT`, syslog numbers) and returns `UNKNOWN` instead of throwing. An
+unrecognised level is data, not a crash.
 
-### 3.3 `Ansi` — one decision point
+### Ansi
 
-Colour is resolved once at startup, in priority order:
+Colour is decided once at startup, in this order:
 
-1. explicit `--color` / `--no-color`
-2. `NO_COLOR` environment variable ([no-color.org](https://no-color.org))
-3. `System.console() != null` — null when stdout is piped or redirected
+1. an explicit `--color` / `--no-color`
+2. the `NO_COLOR` env var ([no-color.org](https://no-color.org))
+3. otherwise, `System.console() != null`, which is null when stdout is piped or
+   redirected
 
-When disabled, every method is identity. Call sites never branch on colour, which is what keeps the renderer readable.
+When colour is off, every method just returns its argument. That's what lets the
+renderer call `ansi.red(...)` everywhere without ever checking whether colour is on.
 
----
+## The parts that aren't obvious
 
-## 4. The three non-obvious algorithms
+### Format detection is an ordered fall-through
 
-### 4.1 Format detection — ordered, guarded fall-through
-
-`LogParser.parse()` tries formats in a fixed order and takes the first that matches. Order is not arbitrary: cheapest and least ambiguous first.
+`LogParser.parse()` tries each format in a fixed order and takes the first that
+matches:
 
 ```
-JSON    → first non-space char is '{', then Jackson readTree
-klog    → regex anchored on ^[IWEF]\d{4}\s+HH:mm:ss …\S+:\d+]
-logfmt  → line must OPEN with key=, and tokens must cover ≥50% of it
-PLAIN   → nothing matched
+JSON     first non-space char is '{', then Jackson parses it
+Airflow  [ts] {file:line} LEVEL - msg
+klog     I0815 10:22:01.101234  1 controller.go:123] msg
+Python   ts - logger - LEVEL - msg
+log4j    ts LEVEL [thread] logger: msg   (Spark/Hadoop/Kafka/Flink/…)
+logfmt   line opens with key= and tokens cover most of it
+generic  a timestamp then a level word somewhere near the front
+PLAIN    nothing matched
 ```
 
-**The guards matter more than the patterns.** logfmt is the ambiguous case: a prose line such as `error: connection = refused` contains an `=` and would misclassify under a naive token scan. Two conditions defend against it — the line must begin with `key=`, and matched tokens must cover at least half the line's characters. Failing either, it falls through to `PLAIN` and renders verbatim, which is the safe outcome.
+The order isn't arbitrary. The generic matcher will grab almost anything with a
+timestamp and a level word in it, so it has to run last, after every specific
+parser has had its shot. If it ran earlier it would swallow lines the specific
+parsers should own, and render them worse.
 
-**Prefix stripping runs first**, and only its result is passed to the format detectors:
+logfmt is the one that's easy to get wrong. A prose line like
+`error: connection = refused` has an `=` in it and a naive token scan would call
+it structured. Two guards stop that: the line has to *start* with `key=`, and the
+matched tokens have to cover at least half the characters. Miss either and it
+falls through to PLAIN and prints verbatim, which is the safe outcome.
 
-| Wrapper | Pattern | Extracted |
-|---|---|---|
-| `kubectl logs --prefix` | `^\[([^\]]+)]\s+(.*)$` | `pod/name/container` → the **pod** segment |
-| `docker compose` | `^(\S+)\s*\|\s(.*)$` | the service name |
+Prefix stripping happens before any of this, and only the stripped remainder is
+handed to the matchers. A `kubectl logs --prefix` wrapper like
+`[pod/name/container]` yields the pod name; a `docker compose` prefix like
+`svc | ...` yields the service. The compose pattern insists on a literal `|`,
+otherwise it'd eat the first word of ordinary prose. If neither prefix matches,
+the *original* line goes forward untouched, never a half-chewed one.
 
-The compose pattern requires a literal `|`. Without that constraint it would consume the first word of ordinary prose. When neither matches, the *original* line is carried forward untouched — never a partially-consumed one.
+### Continuations are attached by inheritance, not lookahead
 
-### 4.2 Continuation attachment — inheritance, not lookahead
+A JVM stack frame has no level and no request id, so it can't satisfy `--trace` or
+`--level` on its own. Judge it independently and it gets dropped, which tears the
+stack trace off the very error you're chasing. (This was a real bug in v0.1.)
 
-A JVM stack frame has no fields, so it cannot satisfy `--trace` or `--level` on its own. Judged independently it gets dropped — which removes the stack trace from the very error you are tracing. This was a real defect in v0.1, found while writing documentation.
+Detection runs after prefix stripping, so compose-wrapped frames still register.
+A line is a continuation if it's indented (unless the trimmed remainder starts
+with `{`, which is an indented JSON entry) or opens with a known marker: `at `,
+`Caused by:`, `Suppressed:`, `... N more`, or a `com.foo.SomeException:` line.
 
-**Detection** (after prefix stripping, so compose-wrapped frames still register):
-
-- leading whitespace — *unless* the trimmed remainder starts with `{`, which is an indented JSON entry
-- or an opening marker: `at <frame>`, `Caused by:`, `Suppressed:`, `... N more`, `com.foo.SomeException:`
-
-**Attachment** is one boolean in the read loop:
+Attachment is a single boolean in the read loop:
 
 ```java
 if (entry.kind == CONTINUATION) {
-    keep = lastEntryKept;          // inherit the parent's verdict
+    keep = lastEntryKept;          // ride on the parent's decision
 } else {
     keep = keep(entry, needle);
     lastEntryKept = keep;
 }
 ```
 
-The alternative — buffer an entry, peek at the next line, then emit — would make `kubectl logs -f | loglens` lag one line behind indefinitely, because the pending line only flushes when another arrives. **Inheritance preserves streaming semantics; lookahead would break them.** That constraint drove the design.
+The alternative would be to buffer an entry, peek at the next line, then emit. But
+that makes `kubectl logs -f | loglens` lag a line behind forever, because the
+pending line only flushes when the next one arrives. Inheritance keeps the stream
+live; lookahead wouldn't. That constraint drove the whole design.
 
-Indentation is *normalised* to four spaces at render time rather than echoed, because the `\s+` in the kubectl prefix pattern consumes the original leading tab, and sources differ in indent depth anyway.
+Indentation is normalised to four spaces at render time rather than echoed,
+because the prefix regex eats the original leading tab and sources indent to
+different depths anyway.
 
-### 4.3 Message templating — why `--stats` is useful
+### Message templating is what makes --stats useful
 
-Counting raw messages is worthless: 400 timeouts differing only in IP and duration count as 400 problems. `MessageTemplate.collapse()` replaces the varying parts with placeholders so occurrences group.
+Counting raw messages is pointless: 400 timeouts that differ only in IP and
+duration count as 400 problems. `MessageTemplate.collapse()` swaps the varying
+parts for placeholders so the repeats group:
 
 ```
 Connection to 10.0.3.14:5432 timed out after 30012ms
 Connection to 10.0.7.82:5432 timed out after 29984ms
-        ↓
-Connection to <ip>:<num> timed out after <num>ms      →  2×
+        becomes
+Connection to <ip>:<num> timed out after <num>ms     2×
 ```
 
-Same premise as Drain/logreduce, implemented as an **ordered substitution list** rather than a parse tree — sufficient for single-line messages and O(rules) per line with no state.
+Same idea as Drain/logreduce, but done as an ordered list of substitutions instead
+of a parse tree. That's enough for single-line messages and costs nothing per line.
 
-**Order is load-bearing.** Specific patterns must consume their text before general ones:
+The order of the rules matters. Specific patterns have to consume their text
+before general ones get to it:
 
 ```
 uuid → timestamp → ip → email → url → @hash → pod-suffix
-     → path → long-hex → short-id → quoted-string → NUMBER (last)
+     → path → long-hex → short-id → quoted-string → number (last)
 ```
 
-A UUID reaching the number rule first would be shredded into `<num>-<num>-…` and never group.
+A UUID that reached the number rule first would come out as `<num>-<num>-...` and
+never group with its siblings.
 
-> **Regression worth recording.** The number rule was originally `\b\d+(\.\d+)?\b`. The trailing `\b` never matches in `30012ms`, because a digit followed by a letter is not a word boundary. The varying duration therefore survived into the template and identical failures never grouped — three Postgres timeouts rendered as three separate `1×` rows, defeating the entire feature. The trailing `\b` was removed; the leading one is retained, and is what prevents digits being chewed out of identifiers like `x4k2`.
->
-> This was found by exercising `collapse()` directly on known-equivalent inputs, not by reading output. It is the strongest argument in the codebase for unit tests.
+One regression here is worth knowing about, because it's why the templating has
+tests. The number rule started life as `\b\d+(\.\d+)?\b`. The trailing `\b` never
+matches in `30012ms`, since a digit followed by a letter isn't a word boundary, so
+the varying duration survived into the template and identical failures never
+grouped: three Postgres timeouts showed up as three separate `1×` rows, which
+defeats the point of the feature. Dropping the trailing `\b` fixed it; the leading
+one stays, and is what keeps digits from being pulled out of ids like `x4k2`. It
+was caught by running `collapse()` on known-equal inputs, not by eyeballing output.
 
-Templates are whitespace-normalised and capped at 160 characters — two messages agreeing that far are the same problem.
+Templates are whitespace-normalised and capped at 160 characters. Two messages
+that agree that far are the same problem.
 
----
+## Filtering
 
-## 5. Filtering
-
-`LogLens.keep()` — all active filters AND together.
+`LogLens.keep()` ANDs the active filters together:
 
 ```
-grep    → substring of raw, case-insensitive
-trace   → requestId equals the argument exactly
-level   → level.compareTo(min) >= 0, with UNKNOWN exempt
-where   → every KEY=VALUE matches extras[KEY] exactly
+grep    substring of raw, case-insensitive
+trace   requestId equals the argument exactly
+level   level.compareTo(min) >= 0, with UNKNOWN exempt
+where   every KEY=VALUE matches extras[KEY] exactly
 ```
 
-Two deliberate asymmetries:
+Two choices here are deliberate:
 
-**Unstructured lines are kept only while no structured filter is active.** With no filters, a startup banner is useful context. Under `--level ERROR`, a line with no level cannot satisfy the request, so it drops. Retaining it would mean `--level ERROR` printing non-errors.
+Unstructured lines are kept only while no field-based filter is on. With no
+filters, a plaintext startup banner is useful context. Under `--level ERROR`, a
+line with no level can't be an error, so it drops. Keeping it would mean
+`--level ERROR` printing non-errors.
 
-**`--where service=x` falls back to `source`.** If a line has no `service` field but arrived with a `kubectl`/compose prefix, the prefix answers the question the user asked. Special-cased to the `service` key only, rather than a general alias table, because that is the one case where prefix and field are semantically the same thing.
+`--where service=x` falls back to the source. If a line has no `service` field but
+came in with a kubectl/compose prefix, the prefix is the answer to the question the
+user asked. It's special-cased to `service` only, not a general alias table,
+because that's the one field where the prefix and a logged value mean the same
+thing.
 
----
+## Aggregation
 
-## 6. Aggregation
+`StatsCollector` keeps, per line:
 
-`StatsCollector` maintains, per line:
+- running totals and an unparsed count
+- counts by level (a `Map<Level,Long>`, at most 7 keys)
+- counts by source (a `HashMap`, one key per pod)
+- distinct problems, keyed by *template* rather than raw message
+- errors per minute, in a `TreeMap` so the buckets stay ordered for the peak line
 
-| Accumulator | Structure | Bound |
-|---|---|---|
-| totals, unparsed count | `long` | O(1) |
-| by level | `Map<Level,Long>` | ≤ 7 entries |
-| by source | `HashMap<String,Long>` | distinct pods |
-| distinct problems | `HashMap<String,Pattern>` | distinct **templates**, not lines |
-| errors per minute | `TreeMap<String,Long>` | minutes spanned |
+Two scoping calls keep the output dense: continuations aren't counted (a stack
+frame isn't its own event, and counting frames inflates totals by stack depth),
+and only WARN and above get clustered (INFO patterns dominate by volume and bury
+the real findings).
 
-Two scoping decisions keep the output signal-dense:
+Memory is bounded by cardinality, not stream length. A 10 GB log with 20 distinct
+failure modes uses the same memory as a 10 MB one.
 
-- **Continuations are not counted.** A stack frame is not an event; counting frames inflates totals by stack depth.
-- **Only WARN and above are clustered.** INFO patterns dominate by volume and bury real findings.
+## Performance
 
-`TreeMap` for the time buckets gives ordered iteration for free, which is what makes the peak-minute line cheap to compute.
+- Time per line is O(rules): about a dozen regex applications worst case, and only
+  on WARN+ lines.
+- Memory is O(distinct templates + distinct sources), independent of log size.
+- Allocation per line is one `LinkedHashMap` and one `StringBuilder`.
+- Output goes through a `PrintWriter` with autoFlush on, so a piped `-f` streams
+  live instead of appearing in 8 KB chunks.
 
-**Memory is bounded by cardinality, not stream length** — a 10 GB log with 20 distinct failure modes uses the same memory as a 10 MB one.
+Nothing here has been benchmarked. Jackson's `readTree` builds a full node tree
+per JSON line, and a flat scanner would probably be faster, but that's a guess
+until someone profiles it.
 
----
+## Adding a format
 
-## 7. Performance
-
-| Property | Value |
-|---|---|
-| Time per line | O(rules); ~12 regex applications worst case, only on WARN+ |
-| Memory | O(distinct templates + distinct sources) — independent of log size |
-| Allocation per line | one `LinkedHashMap`, one `StringBuilder` |
-| Output | `PrintWriter(autoFlush=true)` so piped `-f` streams live |
-
-`autoFlush` trades throughput for latency deliberately: an interactive tail that only appears when an 8 KB buffer fills is unusable.
-
-**Unmeasured.** No benchmarks exist. Jackson's `readTree` allocates a full node tree per line; a streaming parser or a hand-rolled flat-object scanner would likely be faster, but nothing has been profiled, so that remains a hypothesis rather than a plan.
-
----
-
-## 8. Extension: adding a format
-
-Contained by design — one method plus one enum constant.
+It's meant to be one method plus one enum constant:
 
 1. Add a constant to `LogEntry.Kind`.
-2. Write `tryXxx(String rest)` in `LogParser`, returning `null` on no-match.
-3. Insert the call into the `parse()` chain, ordered by specificity — **more specific formats must precede more permissive ones**.
-4. If it is a key/value format, reuse `build(kind, raw, extras)` for field lifting.
-5. Add a guard against false positives, then confirm a representative line still classifies correctly.
+2. Write `tryXxx(String rest)` in `LogParser`, returning `null` when it doesn't
+   match.
+3. Slot the call into the `parse()` chain by specificity. More specific formats go
+   before more permissive ones.
+4. For a key/value format, reuse `build(kind, raw, extras)` to lift the well-known
+   fields. For a positional one, reuse `logEntry(...)`.
+5. Add a guard against false positives and a test with a representative line.
 
-Adding Airflow's `[ts] {file:line} LEVEL - msg` is exactly this shape: one anchored regex, placed before `logfmt`.
+Airflow, log4j, Python and the generic fallback were all added exactly this way in
+v0.2.
 
----
-
-## 9. Build and distribution
+## Build and distribution
 
 ```
-mvn package              → target/loglens.jar   (shade fat jar, manifest main-class)
-mvn -Pnative package     → target/loglens       (GraalVM native-image)
+mvn package              target/loglens.jar   (shaded fat jar)
+mvn -Pnative package     target/loglens       (GraalVM native image)
 ```
 
-`picocli-codegen` runs as an annotation processor, generating GraalVM reflection metadata for the `@Command` tree — which is why the native build needs no hand-written reflection config.
+`picocli-codegen` runs as an annotation processor and generates the GraalVM
+reflection metadata for the command tree, so the native build needs no
+hand-written reflection config.
 
-The native binary matters more than it appears: for a CLI invoked constantly inside pipes, ~200 ms of JVM startup per invocation is the difference between a tool people keep and one they abandon. It is also the only form that installs without a JVM present.
+The native binary matters more than it looks. For a CLI you run constantly inside
+pipes, ~200 ms of JVM startup per call is the difference between a tool people keep
+and one they drop. It's also the only form that installs without a JVM present.
+Building it per platform (macOS arm64, Linux x64, Windows x64) belongs in CI.
 
-Targets are per-platform (macOS arm64, Linux x64, Windows x64) and belong in CI, not on a laptop.
+## Known gaps
 
----
+- **No CI.** The 44 tests exist but nothing runs them automatically, and no release
+  binaries are built. This is the first thing to fix.
+- **No time filtering.** `--since 10m` still means piping through `awk`.
+- **Timestamps stay strings.** They're never parsed into an instant, so time
+  filtering and cross-source ordering aren't possible yet.
+- **Postgres renders badly.** The generic fallback leaves noise like `UTC [1234] :`
+  in the message. A dedicated matcher would fix it.
+- **Old cmd.exe colour.** Escape codes can be emitted where `System.console()` is
+  non-null but ANSI isn't supported. Modern Windows Terminal and PowerShell 7 are
+  fine.
 
-## 10. Known gaps
-
-| Gap | Consequence |
-|---|---|
-| No CI | 44 tests exist but nothing runs them automatically, and no release binaries are produced. |
-| Airflow format unsupported | The author's primary daily log source still renders as `PLAIN`. |
-| No time filtering | `--since 10m` requires piping through `awk` today. |
-| Timestamps are strings | Never parsed into an instant, so time filtering and cross-source ordering are not currently possible. |
-| Old `cmd.exe` colour | Escape codes emitted where `System.console()` is non-null but ANSI is unsupported. Modern Windows Terminal and PowerShell 7 are fine. |
-
-§10 previously led with "no tests". That gap is closed: 44 JUnit tests cover the
-parser (one per format, plus the fall-through guards), the template collapser
-(grouping equivalence, not just placeholder spelling), and Level's ordering.
-Every bug recorded in this document now has a regression test pinning it.
-
-Writing them immediately paid for itself - the suite caught a wrong assertion
-about number/null grouping, which turned out to be a misleading code comment
-rather than a code defect. See MessageTemplateTest.numberAndNullDoNotGroup for
-the reasoning and the accepted cost.
-
-Ordering by risk, CI now comes first: the tests exist but nothing enforces them.
+The tests are worth their weight: writing them caught a wrong assertion about
+number/null grouping, which turned out to be a misleading comment rather than a
+bug (see `MessageTemplateTest.numberAndNullDoNotGroup`). Every bug noted in this
+document has a regression test pinning it.
