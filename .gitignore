@@ -9,3 +9,4 @@ libs/
 out-test/
 libs-test/
 demo/out/*.cast
+dependency-reduced-pom.xml

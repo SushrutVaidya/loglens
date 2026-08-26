@@ -1,101 +1,192 @@
+<div align="center">
+
 # loglens
 
-[![CI](https://github.com/SushrutVaidya/loglens/actions/workflows/ci.yml/badge.svg)](https://github.com/SushrutVaidya/loglens/actions/workflows/ci.yml)
+**Make structured logs readable in the terminal — pretty-print, filter, trace one request, and triage an incident, straight from a pipe.**
 
-Readable logs in the terminal. Pretty-print, filter, trace and summarise
-structured logs - JSON, logfmt, klog, Spark, Hadoop, Kafka, Airflow - with no
-agent, no backend, and no changes to the application producing them.
+[![CI](https://github.com/SushrutVaidya/loglens/actions/workflows/ci.yml/badge.svg)](https://github.com/SushrutVaidya/loglens/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Java](https://img.shields.io/badge/Java-21%2B-orange.svg)](#build-from-source)
+
+![loglens turning a noisy log into a triage summary](docs/img/hero.gif)
+
+</div>
+
+Structured logging is great for machines and hard on people. A real incident looks like this:
+
+```
+{"timestamp":"2026-08-15T10:24:10.489Z","level":"error","trace_id":"9f2c-a1","message":"Connection to 10.0.3.14:5432 timed out after 30012ms","service":"api","status":500}
+```
+
+Pipe it through loglens and you get one scannable, colour-coded line:
+
+```
+10:24:10  ERROR  Connection to 10.0.3.14:5432 timed out after 30012ms  req=9f2c-a1  service=api  status=500
+```
+
+No agent, no backend, no change to the app writing the logs. It reads a file or stdin, so the live-follow case is just a pipe:
 
 ```
 kubectl logs -f mypod | loglens --trace 9f2c-a1
 ```
 
-Structured logging is excellent for machines and hostile to humans:
-
-```
-{"timestamp":"2026-08-15T10:22:03.010Z","level":"error","trace_id":"7b0e-c3","message":"query failed: timeout","sql":"SELECT ..."}
-```
-
-`loglens` turns that into one scannable, colour-coded line:
-
-```
-10:22:03  ERROR  query failed: timeout  req=7b0e-c3  sql=SELECT ...
-```
-
-![loglens triaging an incident](docs/img/stats.gif)
-
 ## Why
 
-It came out of running a Spring Boot service that logged single-line JSON with
-an `X-Request-Id` on every line. Debugging meant `grep`-ing one id out of
-thousands of lines and squinting at braces. `loglens --trace <id>` is that
-workflow as one flag.
+It came out of running a Spring Boot service that logged single-line JSON with an `X-Request-Id` on every line. Debugging meant grepping one id out of thousands of lines and reading braces. `loglens --trace <id>` is that whole workflow as one flag.
+
+## Quickstart
+
+No prebuilt binaries yet, so build the jar once (needs JDK 21+):
+
+```bash
+git clone https://github.com/SushrutVaidya/loglens
+cd loglens
+mvn package                       # runs the tests, then builds target/loglens.jar
+java -jar target/loglens.jar --help
+```
+
+An alias makes the rest readable:
+
+```bash
+alias loglens='java -jar '"$PWD"'/target/loglens.jar'
+```
+
+Three commands cover most of the value:
+
+**1. Pretty-print anything.** One shape, colour-coded by level, whatever the input format:
+
+```console
+$ loglens demo/mixed.log
+09:00:49  INFO   Job 0 finished: collect at Main.scala:24  logger=DAGScheduler
+09:00:51  ERROR  Exception in createBlockOutputStream  logger=org.apache.hadoop.hdfs.DataStreamer
+09:00:53  INFO   [GroupCoordinator 1]: Preparing to rebalance group
+09:00:55  WARN   Watch died gracefully, restarting
+09:00:57  ERROR  Failed to sync pod
+09:00:58  INFO   Server is ready  caller=main.go:123
+09:00:59  ERROR  payment declined  service=billing
+```
+
+**2. Follow one request.** `--trace` shows only that id's lines and keeps stack traces attached to the error they belong to:
+
+```console
+$ loglens --trace 9f2c-a1 demo/incident.log
+10:22:01  INFO   GET /api/stats  req=9f2c-a1  logger=c.s.api.StatsController  service=api  pod=api-7d9f-x4k2
+10:22:01  DEBUG  cache miss, querying db  req=9f2c-a1  logger=c.s.api.StatsService  service=api  key=stats:latest
+10:24:10  WARN   HikariPool-1 - Connection is not available, request timed out after 30000ms  req=9f2c-a1  logger=com.zaxxer.hikari.pool.HikariPool  service=api  activeConnections=10  idleConnections=0
+10:24:10  ERROR  Connection to 10.0.3.14:5432 timed out after 30012ms  req=9f2c-a1  logger=c.s.api.GlobalExceptionHandler  service=api  status=500
+    at com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:696)
+    at org.springframework.jdbc.datasource.DataSourceUtils.fetchConnection(DataSourceUtils.java:159)
+10:24:52  INFO   200 OK  req=9f2c-a1  logger=c.s.api.StatsController  service=api  status=200  durationMs=171014
+```
+
+Cache miss, pool exhausted, 30s timeout, 500, then a 200 after 171 seconds. Five log lines and their stack trace, and the whole request is legible.
+
+**3. Triage before you read.** `--stats` answers "what is the shape of this" instead of showing every line:
+
+```console
+$ loglens --stats --quiet demo/incident.log
+
+────────────────────────────────────────────────────────────────
+12 lines  ·  10:22:01 → 10:24:52
+ERROR 6   WARN 2   INFO 3   DEBUG 1
+
+by source
+  api                                    9
+  nginx-ingress                          2
+
+distinct problems (warn and above)
+       4× ERROR  Connection to 10.0.3.14:5432 timed out after 30012ms
+       2× ERROR  upstream connection refused
+       1× ERROR  Failed to sync pod
+       1× WARN   HikariPool-1 - Connection is not available, request timed out after 30000ms
+
+errors peaked at 10:24 (6 in that minute)
+────────────────────────────────────────────────────────────────
+```
 
 ## Features
 
-- **Pretty-print** JSON, logfmt and klog logs as `time  LEVEL  message  key=val ...`, colour-coded by level.
-- **`--stats`** — a triage summary instead of a scroll. Counts by level and source, **distinct problems with occurrence counts**, and when errors peaked. Near-identical messages collapse by template, so 400 instances of one timeout become one finding rather than 400 lines.
-- **`--trace <id>`** — show only lines for one request and highlight the id. Auto-detects the common correlation fields (`requestId`, `X-Request-Id`, `traceId`, `trace_id`, ...); override with `--trace-field`. Stack traces stay attached to the entry they belong to.
-- **`--level WARN`** — minimum level threshold (`TRACE < DEBUG < INFO < WARN < ERROR < FATAL`).
-- **`--where key=value`** — keep only matching lines; repeatable (AND).
-- **`--grep text`** — substring match on the raw line.
-- **Multi-format, in one stream** — JSON, logfmt (`level=info msg=...`) and klog (`I0815 10:22:01.101 controller.go:123]`) parse side by side, so a `kubectl logs` containing your app *and* the control plane reads uniformly.
-- **Prefix-aware** — strips `kubectl logs --prefix` (`[pod/name/container]`) and `docker compose` (`backend-1 |`) wrappers, showing the pod as a source tag only when a stream carries more than one.
-- **Field-name agnostic** — understands `message`/`msg`/`@message`, `level`/`severity`/`lvl`, `timestamp`/`ts`/`@timestamp`, so it works across Logback, zap, pino, bunyan and friends.
-- **Streaming** — reads line by line, never buffers the whole log. Pipe `kubectl logs -f` straight in.
-- **Well-behaved output** — auto-detects when it's piped and drops colour, honours [`NO_COLOR`](https://no-color.org), passes unparseable lines through untouched.
+### Triage an incident — `--stats`
 
-## Triage an incident in one command
+![loglens triaging an incident](docs/img/stats.gif)
 
-`--stats` answers the question you actually have at 3am - not "show me the lines"
-but "what is the shape of this". Near-identical messages collapse by template, so
-eight errors become three real problems rather than eight rows to read.
+The question at 3am isn't "show me the lines", it's "what's actually broken". `--stats` counts by level and source, then collapses near-identical messages into distinct problems. Two timeouts that differ only by IP and duration are one finding, not two rows, so a wall of errors becomes a short list. It also tells you the minute errors peaked, which is where to point `--trace` next.
 
-Drop `--quiet` to get the summary after the log lines instead of replacing them.
+Drop `--quiet` to print the summary after the log lines instead of replacing them.
 
-## Follow one request end to end
+### Follow one request — `--trace`
 
 ![following one request with --trace](docs/img/trace.gif)
 
-Given a correlation id, `--trace` shows only that request's journey - and keeps
-the stack traces attached to the errors they belong to. Five lines, and the whole
-incident is legible: cache miss, pool exhausted, 30s timeout, 500, then a 200
-after 171 seconds.
+Give it a correlation id and it shows only that request, with the id highlighted and stack traces kept attached to their error. It auto-detects the common id fields (`requestId`, `X-Request-Id`, `traceId`, `trace_id`, `correlationId`, ...); use `--trace-field` for anything else.
 
-It auto-detects the usual correlation fields (`requestId`, `X-Request-Id`,
-`traceId`, `trace_id`, `correlationId`, ...), so it works without configuration.
-
-## Format support
+### One stream, many formats
 
 ![one stream, seven formats](docs/img/multiformat.gif)
 
-A real `kubectl logs` is not one tidy format - it is your service's JSON next to
-the control plane's klog next to the ingress controller's logfmt. All of it
-renders in the same shape, interleaved, in one pass.
+A real `kubectl logs` isn't one tidy format. It's your service's JSON next to the control plane's klog next to an ingress controller's logfmt. loglens parses each line on its own and renders all of it in the same shape, interleaved, in one pass.
+
+### Filters that compose
+
+```bash
+loglens --level ERROR app.log                     # errors and worse
+loglens -w service=auth -l WARN app.log           # one service, warnings up
+loglens --grep timeout app.log                    # raw substring match
+loglens -w service=api --trace 9f2c-a1 app.log    # stack them (AND)
+```
+
+## Flags
+
+| Flag | Meaning |
+|---|---|
+| `FILE` | Log file to read; omit to read stdin |
+| `-t, --trace ID` | Show only lines whose correlation id equals `ID`, and highlight it |
+| `--trace-field NAME` | Field holding the correlation id, if not an auto-detected one |
+| `-l, --level LEVEL` | Minimum level: `TRACE` `DEBUG` `INFO` `WARN` `ERROR` `FATAL` |
+| `-w, --where KEY=VALUE` | Keep lines where field `KEY` equals `VALUE`; repeatable (AND) |
+| `-g, --grep TEXT` | Keep lines whose raw text contains `TEXT` (case-insensitive) |
+| `-s, --stats` | Print a triage summary |
+| `--quiet` | With `--stats`, print only the summary |
+| `--[no-]color` | Force colour on/off (default: auto) |
+| `-h, --help` · `-V, --version` | Help and version |
+
+## Supported formats
 
 | Format | Status |
 |---|---|
-| JSON lines | Supported |
-| logfmt (`level=info msg=...`) | Supported |
-| klog (`I0815 ... controller.go:123]`) | Supported |
-| `kubectl logs --prefix` / `docker compose` prefixes | Supported |
+| JSON lines | Parsed |
+| logfmt (`level=info msg=...`) | Parsed |
+| klog (`I0815 10:22:01.101 controller.go:123]`) | Parsed |
+| Airflow (`[ts] {file:line} LEVEL - msg`) | Parsed |
+| log4j family — Spark, Hadoop, Kafka, Hive, Flink | Parsed |
+| Python logging (`ts - logger - LEVEL - msg`) | Parsed |
+| Generic `timestamp + level` | Fallback |
+| `kubectl logs --prefix` / `docker compose` prefixes | Stripped, kept as source tag |
 | JVM stack traces | Attached to their parent entry |
-| Airflow (`[ts] {file:line} LEVEL - msg`) | **Not yet** |
+| Anything else | Passed through untouched |
 
-## Install
+Field names are matched loosely, so `message`/`msg`/`@message`, `level`/`severity`/`lvl`, and `timestamp`/`ts`/`@timestamp` all work — which covers Logback, zap, pino, bunyan and friends.
 
-Requires JDK 21+ to build.
+## How it works
 
-```bash
-mvn package                      # runs the test suite, then builds the jar
-java -jar target/loglens.jar app.log
+Each line runs through an ordered chain of parsers, most specific first, and the first one that matches wins. If none do, the line is printed verbatim rather than guessed at.
+
+```
+line ─▶ strip prefix ─▶ continuation? ─▶ JSON ─▶ Airflow ─▶ klog ─▶ Python
+                                          ─▶ log4j ─▶ logfmt ─▶ generic ─▶ verbatim
 ```
 
-Run the tests alone with `mvn test` - 44 cases covering every supported format,
-the fall-through guards that stop one parser stealing another's lines, and the
-message-template grouping that `--stats` depends on.
+It's a single streaming pass, one line in and one line out, so it never holds the log in memory and a piped `-f` shows lines as they arrive. The whole thing is 8 small classes and two runtime dependencies (Picocli, Jackson), covered by 44 tests. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the details.
 
-### Native binary (no JVM startup lag)
+## Why not grep / jq / lnav?
+
+- **grep / jq** are line tools. jq only speaks JSON, so it can't read a stream that mixes JSON, klog and logfmt, and neither one does correlation or triage. `--trace` (with stack-trace attachment) and `--stats` (with message collapsing) are the parts you'd otherwise hand-roll.
+- **lnav** is excellent and does far more, but it's a full-screen TUI with its own log database. loglens is a pipe filter with no UI and no state, for the times you just want a stream readable right now and still composable with `grep`, `less` and the rest.
+
+Things loglens deliberately does **not** do: collect or tail logs (that's `kubectl logs -f`, `stern`, `tail`), store or index anything, run a TUI, or write back to the source. Time-based filtering (`--since`) isn't there yet — timestamps are currently kept as strings.
+
+<details>
+<summary><b>Build a native binary (no JVM startup)</b></summary>
 
 With a [GraalVM](https://www.graalvm.org/) JDK on the path:
 
@@ -104,37 +195,25 @@ mvn -Pnative package
 ./target/loglens app.log
 ```
 
-## Usage
+Picocli generates the reflection metadata at compile time, so the native build needs no hand-written config.
 
-```
-loglens [FILE] [options]
+</details>
 
-  FILE                 log file to read; omit to read stdin
-  -t, --trace ID       show only lines whose correlation id equals ID
-      --trace-field N  field holding the correlation id
-  -l, --level LEVEL    minimum level: TRACE|DEBUG|INFO|WARN|ERROR|FATAL
-  -w, --where KEY=VAL  keep lines where field KEY equals VAL (repeatable)
-  -g, --grep TEXT      keep lines whose raw text contains TEXT
-  -s, --stats          print a triage summary after the lines
-      --quiet          with --stats, print only the summary
-      --[no-]color     force colour on/off (default: auto)
-  -h, --help           show help
-  -V, --version        show version
-```
-
-### Examples
+<details>
+<summary><b>Run the tests</b></summary>
 
 ```bash
-# Follow one request end to end, live
-tail -f app.log | loglens --trace 9f2c-a1
-
-# Errors only, from a file
-loglens --level ERROR app.log
-
-# One service's warnings, this request
-loglens -w service=auth -l WARN --trace 7b0e-c3 app.log
+mvn test
 ```
+
+44 cases covering every supported format, the fall-through guards that stop one parser stealing another's lines, and the message-template grouping that `--stats` relies on.
+
+</details>
+
+## Contributing
+
+Issues and PRs welcome. If you're adding a format, it's usually one `tryXxx` method in `LogParser`, slotted into the chain by specificity, plus a test — the parser is built to make that a contained change. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## License
 
-Apache License 2.0 - see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE).
