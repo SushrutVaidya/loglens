@@ -1,5 +1,7 @@
 # loglens
 
+[![CI](https://github.com/SushrutVaidya/loglens/actions/workflows/ci.yml/badge.svg)](https://github.com/SushrutVaidya/loglens/actions/workflows/ci.yml)
+
 Readable logs in the terminal. Pretty-print, filter, trace and summarise
 structured logs - JSON, logfmt, klog, Spark, Hadoop, Kafka, Airflow - with no
 agent, no backend, and no changes to the application producing them.
