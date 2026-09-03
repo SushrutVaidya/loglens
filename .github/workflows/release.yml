@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write            # create the release and upload the binaries
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false       # one platform failing shouldn't sink the others
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: loglens-linux-x64
+            binary: target/loglens
+          - os: ubuntu-24.04-arm
+            asset: loglens-linux-arm64
+            binary: target/loglens
+          - os: macos-latest          # Apple Silicon
+            asset: loglens-macos-arm64
+            binary: target/loglens
+          - os: macos-13              # Intel
+            asset: loglens-macos-x64
+            binary: target/loglens
+          - os: windows-latest
+            asset: loglens-windows-x64.exe
+            binary: target/loglens.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up GraalVM (JDK 21)
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: graalvm-community
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build native image
+        run: mvn -B -ntp -Pnative package
+
+      - name: Smoke-test the binary
+        shell: bash
+        run: ${{ matrix.binary }} --version
+
+      - name: Stage binary under its platform name
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.asset }}
+          # A tag with a hyphen (v0.2.0-rc1) is published as a pre-release,
+          # so you can test the full matrix before cutting the real thing.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
