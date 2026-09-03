@@ -24,9 +24,6 @@ jobs:
           - os: macos-latest          # Apple Silicon
             asset: loglens-macos-arm64
             binary: target/loglens
-          - os: macos-13              # Intel
-            asset: loglens-macos-x64
-            binary: target/loglens
           - os: windows-latest
             asset: loglens-windows-x64.exe
             binary: target/loglens.exe
