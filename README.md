@@ -34,24 +34,30 @@ kubectl logs -f mypod | loglens --trace 9f2c-a1
 
 It came out of running a Spring Boot service that logged single-line JSON with an `X-Request-Id` on every line. Debugging meant grepping one id out of thousands of lines and reading braces. `loglens --trace <id>` is that whole workflow as one flag.
 
+## Install
+
+One line — no JVM, no build:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SushrutVaidya/loglens/main/install.sh | sh
+```
+
+It detects your OS and CPU, downloads the matching binary from the [latest release](https://github.com/SushrutVaidya/loglens/releases/latest), and puts it on your PATH (using `sudo` only if the install directory needs it).
+
+Or grab a binary yourself — download it, `chmod +x`, and move it onto your PATH:
+
+| Platform | Binary |
+|---|---|
+| macOS (Apple Silicon) | [`loglens-macos-arm64`](https://github.com/SushrutVaidya/loglens/releases/latest/download/loglens-macos-arm64) |
+| Linux x86-64 | [`loglens-linux-x64`](https://github.com/SushrutVaidya/loglens/releases/latest/download/loglens-linux-x64) |
+| Linux arm64 | [`loglens-linux-arm64`](https://github.com/SushrutVaidya/loglens/releases/latest/download/loglens-linux-arm64) |
+| Windows x86-64 | [`loglens-windows-x64.exe`](https://github.com/SushrutVaidya/loglens/releases/latest/download/loglens-windows-x64.exe) |
+
+On macOS a browser-downloaded binary is quarantined by Gatekeeper — the `curl` install above avoids that, or clear it with `xattr -d com.apple.quarantine loglens`. On Windows, SmartScreen may warn on the unsigned `.exe` ("More info → Run anyway"). Linux binaries are glibc-based (mainstream distros; Alpine/musl not yet). None of these need Java. To build it yourself instead, see [Build from source](#build-from-source).
+
 ## Quickstart
 
-No prebuilt binaries yet, so build the jar once (needs JDK 21+):
-
-```bash
-git clone https://github.com/SushrutVaidya/loglens
-cd loglens
-mvn package                       # runs the tests, then builds target/loglens.jar
-java -jar target/loglens.jar --help
-```
-
-An alias makes the rest readable:
-
-```bash
-alias loglens='java -jar '"$PWD"'/target/loglens.jar'
-```
-
-Three commands cover most of the value:
+Three commands cover most of the value (the sample logs live in [`demo/`](demo)):
 
 **1. Pretty-print anything.** One shape, colour-coded by level, whatever the input format:
 
@@ -185,30 +191,25 @@ It's a single streaming pass, one line in and one line out, so it never holds th
 
 Things loglens deliberately does **not** do: collect or tail logs (that's `kubectl logs -f`, `stern`, `tail`), store or index anything, run a TUI, or write back to the source. Time-based filtering (`--since`) isn't there yet — timestamps are currently kept as strings.
 
-<details>
-<summary><b>Build a native binary (no JVM startup)</b></summary>
+## Build from source
 
-With a [GraalVM](https://www.graalvm.org/) JDK on the path:
+Prefer a jar, or on a platform without a prebuilt binary? Needs JDK 21+:
+
+```bash
+git clone https://github.com/SushrutVaidya/loglens
+cd loglens
+mvn package                       # runs the tests, then builds target/loglens.jar
+java -jar target/loglens.jar --help
+```
+
+For a native binary (no JVM startup) — the same kind the releases ship — build with a [GraalVM](https://www.graalvm.org/) JDK on the path:
 
 ```bash
 mvn -Pnative package
 ./target/loglens app.log
 ```
 
-Picocli generates the reflection metadata at compile time, so the native build needs no hand-written config.
-
-</details>
-
-<details>
-<summary><b>Run the tests</b></summary>
-
-```bash
-mvn test
-```
-
-44 cases covering every supported format, the fall-through guards that stop one parser stealing another's lines, and the message-template grouping that `--stats` relies on.
-
-</details>
+Picocli generates the reflection metadata at compile time, so the native build needs no hand-written config. Run the tests alone with `mvn test` — 44 cases covering every supported format, the fall-through guards that stop one parser stealing another's lines, and the message-template grouping that `--stats` relies on.
 
 ## Contributing
 
