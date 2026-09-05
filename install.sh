@@ -13,6 +13,12 @@ REPO="SushrutVaidya/loglens"
 VERSION="${VERSION:-latest}"
 BINDIR="${BINDIR:-/usr/local/bin}"
 
+# --- note any existing install so we can report an upgrade at the end ------
+old_version=""
+if command -v loglens >/dev/null 2>&1; then
+  old_version="$(loglens --version 2>/dev/null | awk '{print $2}')"
+fi
+
 # --- pick the right binary for this machine --------------------------------
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -67,12 +73,17 @@ else
 fi
 trap - EXIT
 
-echo "loglens: installed to $target"
+new_version="$("$target" --version 2>/dev/null | awk '{print $2}')"
+if [ -n "$old_version" ] && [ "$old_version" != "$new_version" ]; then
+  echo "loglens: upgraded $old_version -> $new_version  ($target)"
+elif [ -n "$old_version" ]; then
+  echo "loglens: reinstalled $new_version  ($target)"
+else
+  echo "loglens: installed $new_version  ($target)"
+fi
 
 # --- warn if the install dir isn't on PATH ---------------------------------
 case ":$PATH:" in
   *":$BINDIR:"*) ;;
   *) echo "loglens: note — $BINDIR is not on your PATH; add it or move the binary." >&2 ;;
 esac
-
-"$target" --version
