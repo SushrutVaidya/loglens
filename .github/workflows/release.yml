@@ -34,8 +34,8 @@ jobs:
       - name: Set up GraalVM (JDK 21)
         uses: graalvm/setup-graalvm@v1
         with:
-          java-version: '21'
-          distribution: graalvm-community
+          java-version: '21.0.2'   # pinned: a floating "21" once shipped a binary
+          distribution: graalvm-community   # that silently dropped several parsers
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build native image
@@ -43,7 +43,25 @@ jobs:
 
       - name: Smoke-test the binary
         shell: bash
-        run: ${{ matrix.binary }} --version
+        run: |
+          bin="${{ matrix.binary }}"
+          "$bin" --version
+          # Verify the binary actually PARSES, not just runs. A native build can
+          # compile and report --version yet silently fail to match some formats
+          # (this happened once). Feed one line per format and fail if any comes
+          # back verbatim instead of rendered as "HH:MM:SS  LEVEL  ...".
+          check() {
+            out="$(printf '%s\n' "$2" | "$bin" --no-color)"
+            printf '%-8s %s\n' "$1" "$out"
+            case "$out" in
+              "$2"*) echo "PARSE REGRESSION: $1 line passed through verbatim" >&2; exit 1 ;;
+            esac
+          }
+          check json    '{"level":"error","msg":"x","ts":"2026-01-01T00:00:00Z"}'
+          check klog     'I0101 00:00:00.000000 1 controller.go:1] x'
+          check logfmt   'level=info msg="x" ts=2026-01-01T00:00:00Z'
+          check airflow  '[2026-01-01T00:00:00Z +0000] INFO - x'
+          check log4j    '2026-01-01 00:00:00,000 INFO SparkContext: x'
 
       - name: Stage binary under its platform name
         shell: bash
