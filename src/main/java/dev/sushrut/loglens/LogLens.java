@@ -34,7 +34,6 @@ import java.util.concurrent.Callable;
  */
 @Command(
     name = "loglens",
-    mixinStandardHelpOptions = true,
     version = "loglens 0.2.0",
     sortOptions = false,
     description = "Pretty-print, filter, trace and summarise structured logs."
@@ -97,8 +96,17 @@ public final class LogLens implements Callable<Integer> {
     )
     private boolean quiet;
 
-    @Option(names = "--color", negatable = true, description = "Force colour on/off (default: auto).")
+    @Option(names = "--color", negatable = true,
+        description = "Force colour on/off (default: on; disable with --no-color or NO_COLOR).")
     private Boolean color;
+
+    @Option(names = {"-h", "--help"}, usageHelp = true,
+        description = "Show this help message and exit.")
+    private boolean helpRequested;
+
+    @Option(names = {"-v", "-V", "--version"}, versionHelp = true,
+        description = "Print version information and exit.")
+    private boolean versionRequested;
 
     @Override
     public Integer call() {
