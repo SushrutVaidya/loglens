@@ -18,12 +18,21 @@ final class Ansi {
         this.on = on;
     }
 
-    /** @param force null = auto-detect; TRUE/FALSE = explicit --color/--no-color */
+    /**
+     * @param force null = default (colour on, unless NO_COLOR is set);
+     *              TRUE/FALSE = explicit --color / --no-color
+     *
+     * Colour defaults ON rather than auto-detecting a terminal. The primary use
+     * is {@code ... | loglens}, where stdin is a pipe — and Java's
+     * {@code System.console()} is null whenever stdin OR stdout isn't a terminal,
+     * so it can't distinguish "piped in, terminal out" (want colour) from
+     * "redirected out" (don't). Defaulting on and honouring NO_COLOR / --no-color
+     * fits the pipe-in case; redirect output with --no-color for plain text.
+     */
     static Ansi resolve(Boolean force) {
         if (force != null) return new Ansi(force);
         if (System.getenv("NO_COLOR") != null) return new Ansi(false);
-        // System.console() is null when stdout is piped or redirected.
-        return new Ansi(System.console() != null);
+        return new Ansi(true);
     }
 
     boolean enabled() {

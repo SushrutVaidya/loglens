@@ -153,8 +153,8 @@ loglens -w service=api --trace 9f2c-a1 app.log    # stack them (AND)
 | `-g, --grep TEXT` | Keep lines whose raw text contains `TEXT` (case-insensitive) |
 | `-s, --stats` | Print a triage summary |
 | `--quiet` | With `--stats`, print only the summary |
-| `--[no-]color` | Force colour on/off (default: auto) |
-| `-h, --help` · `-V, --version` | Help and version |
+| `--[no-]color` | Force colour on/off (default: on; disable with `--no-color` or `NO_COLOR`) |
+| `-h, --help` · `-v, --version` | Help and version |
 
 ## Supported formats
 
