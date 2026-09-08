@@ -6,7 +6,7 @@
 
   <groupId>dev.sushrut</groupId>
   <artifactId>loglens</artifactId>
-  <version>0.2.0</version>
+  <version>0.2.3</version>
   <packaging>jar</packaging>
 
   <name>loglens</name>
@@ -45,6 +45,20 @@
   <build>
     <finalName>loglens</finalName>
     <plugins>
+      <!-- Bakes ${project.version} into BuildInfo.java at build time, so the
+           CLI version tracks the release, not a hand-edited string. -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>templating-maven-plugin</artifactId>
+        <version>3.0.0</version>
+        <executions>
+          <execution>
+            <id>filter-src</id>
+            <goals><goal>filter-sources</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>

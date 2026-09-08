@@ -33,4 +33,11 @@ class LogLensTest {
         // No --color/--no-color: on by default, off only when NO_COLOR is present.
         assertEquals(System.getenv("NO_COLOR") == null, Ansi.resolve(null).enabled());
     }
+
+    @Test
+    void versionComesFromTheBuild() throws Exception {
+        String v = new VersionProvider().getVersion()[0];
+        assertTrue(v.startsWith("loglens "), v);
+        assertTrue(v.matches("loglens \\d+\\.\\d+.*"), v);   // e.g. "loglens 0.2.3"
+    }
 }
