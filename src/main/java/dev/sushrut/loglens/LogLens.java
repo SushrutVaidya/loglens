@@ -34,7 +34,7 @@ import java.util.concurrent.Callable;
  */
 @Command(
     name = "loglens",
-    version = "loglens 0.2.0",
+    versionProvider = VersionProvider.class,
     sortOptions = false,
     description = "Pretty-print, filter, trace and summarise structured logs."
 )
