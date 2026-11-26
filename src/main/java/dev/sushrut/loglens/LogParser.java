@@ -93,6 +93,20 @@ final class LogParser {
         "\\b(TRACE|DEBUG|INFO|INFORMATION|NOTICE|WARN|WARNING|ERROR|SEVERE|FATAL|CRITICAL)\\b",
         Pattern.CASE_INSENSITIVE);
 
+    // journalctl -o short / short-iso / short-precise and classic syslog:
+    //   2026-11-24T10:22:01+0530 host dockerd[812]: payload
+    //   Nov 24 10:22:01 host sshd[1234]: payload
+    private static final Pattern SYSLOG = Pattern.compile(
+        "^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?"
+        + "|[A-Z][a-z]{2}\\s{1,2}\\d{1,2}\\s\\d{2}:\\d{2}:\\d{2})"
+        + "\\s+(\\S+)\\s+([^\\s\\[:]+)(?:\\[(\\d+)])?:\\s?(.*)$");
+    // A level a syslog payload states outright: <warn>, [ERROR], (err), or "error:".
+    // Deliberately not a bare word: "Error Reporting Service" is not an error.
+    private static final Pattern SYSLOG_LEVEL = Pattern.compile(
+        "[<\\[(]\\s*(trace|debug|info|notice|warn|warning|err|error|fatal|crit|critical)\\s*[>\\])]"
+        + "|\\b(trace|debug|info|notice|warn|warning|error|fatal|critical):",
+        Pattern.CASE_INSENSITIVE);
+
     // klog: I0815 10:22:01.101234   1 controller.go:123] message
     private static final Pattern KLOG = Pattern.compile(
         "^([IWEF])\\d{4}\\s+(\\d{2}:\\d{2}:\\d{2})(?:\\.\\d+)?\\s+\\d+\\s+\\S+:\\d+]\\s?(.*)$");
@@ -129,15 +143,7 @@ final class LogParser {
             return LogEntry.continuation(rest).withSource(source);
         }
 
-        LogEntry entry = tryJson(rest);
-        if (entry == null) entry = tryAirflow(rest);
-        if (entry == null) entry = tryKlog(rest);
-        if (entry == null) entry = tryPythonLogging(rest);
-        if (entry == null) entry = tryLog4j(rest);
-        if (entry == null) entry = tryLogfmt(rest);
-        // Generic heuristic runs last: it is the most permissive matcher here,
-        // so anything it could wrongly claim must get first refusal above.
-        if (entry == null) entry = tryGeneric(rest);
+        LogEntry entry = tryFormats(rest, true);
 
         if (entry != null) return entry.withSource(source);
         return LogEntry.plain(line);
@@ -172,6 +178,78 @@ final class LogParser {
             return new String[]{c.group(1), c.group(2)};
         }
         return new String[]{null, line};
+    }
+
+    /**
+     * The ordered format chain. Syslog/journald sits in the middle: it is a
+     * wrapper whose payload is parsed by this same chain (minus itself), so it
+     * must come after the formats that start with their own timestamp, and
+     * before logfmt and the generic heuristic, which would otherwise claim a
+     * journald line and get it wrong.
+     */
+    private LogEntry tryFormats(String rest, boolean allowSyslog) {
+        LogEntry entry = tryJson(rest);
+        if (entry == null) entry = tryAirflow(rest);
+        if (entry == null) entry = tryKlog(rest);
+        if (entry == null) entry = tryPythonLogging(rest);
+        if (entry == null) entry = tryLog4j(rest);
+        if (entry == null && allowSyslog) entry = trySyslog(rest);
+        if (entry == null) entry = tryLogfmt(rest);
+        // Generic heuristic runs last: it is the most permissive matcher here,
+        // so anything it could wrongly claim must get first refusal above.
+        if (entry == null) entry = tryGeneric(rest);
+        return entry;
+    }
+
+    // ---- syslog / journald ---------------------------------------------------
+
+    /**
+     * {@code journalctl -o short|short-iso|short-precise} and classic syslog:
+     * a {@code timestamp host ident[pid]:} header around an arbitrary payload.
+     *
+     * The payload is often itself structured (dockerd and tailscaled emit
+     * logfmt), so it is run back through the format chain and its level,
+     * message and fields win. The ident becomes the source, which is what makes
+     * {@code --stats} "by source" and {@code --where service=sshd} work on a
+     * journal. The header's timestamp is kept in preference to any inside the
+     * payload: it is the one column every line in the stream has, in one shape.
+     *
+     * Short output drops journald's PRIORITY, so a payload that is not
+     * structured gets a level only when it states one unambiguously
+     * ({@code <warn>}, {@code [ERROR]}, {@code error:}). Anything else stays
+     * UNKNOWN rather than guessing severity from prose.
+     */
+    private LogEntry trySyslog(String rest) {
+        Matcher m = SYSLOG.matcher(rest.strip());
+        if (!m.matches()) return null;
+
+        String timestamp = m.group(1);
+        String ident = m.group(3);
+        String pid = m.group(4);
+        String body = m.group(5);
+
+        Map<String, Object> extras = new LinkedHashMap<>();
+        Level level;
+        String message;
+        String requestId = null;
+
+        LogEntry inner = tryFormats(body, false);
+        if (inner != null) {
+            extras.putAll(inner.extras);
+            level = inner.level;
+            message = inner.message;
+            requestId = inner.requestId;
+        } else {
+            message = body;
+            Matcher lv = SYSLOG_LEVEL.matcher(body);
+            level = (lv.find() && lv.start() < 120)
+                ? Level.from(lv.group(1) != null ? lv.group(1) : lv.group(2))
+                : Level.UNKNOWN;
+        }
+        if (pid != null) extras.put("pid", pid);
+
+        return LogEntry.structured(LogEntry.Kind.SYSLOG, rest, timestamp, level, message, requestId, extras)
+            .withSource(ident);
     }
 
     // ---- JSON ---------------------------------------------------------------
@@ -255,6 +333,8 @@ final class LogParser {
         String message = (remainder.substring(0, lv.start()) + remainder.substring(lv.end())).strip();
         // Tidy the separators log formats leave behind once the level is removed.
         message = message.replaceFirst("^[\\[\\]\\-:|\\s]+", "").strip();
+        // "subsys: error: boom" loses its level word and would read "subsys: : boom".
+        message = message.replaceAll(":\\s+:", ":");
 
         return logEntry(rest, ts.group(1), lv.group(1), null, null, message);
     }

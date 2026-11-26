@@ -284,4 +284,73 @@ class LogParserTest {
             assertEquals("ignored", e.extras.get("requestId"));
         }
     }
+
+    @Nested
+    @DisplayName("syslog / journald")
+    class Syslog {
+
+        @Test
+        @DisplayName("journalctl short-iso around a logfmt payload: payload level and fields win")
+        void shortIsoLogfmtPayload() {
+            LogEntry e = parser.parse("2026-11-24T10:22:01+0530 omnissiah dockerd[812]: "
+                + "time=\"2026-11-24T10:22:01.123+05:30\" level=error msg=\"resolver failed\" dns-server=1.1.1.1:53");
+            assertEquals(LogEntry.Kind.SYSLOG, e.kind);
+            assertEquals(Level.ERROR, e.level);
+            assertEquals("resolver failed", e.message);
+            assertEquals("dockerd", e.source);
+            assertEquals("2026-11-24T10:22:01+0530", e.timestamp);
+            assertEquals("1.1.1.1:53", e.extras.get("dns-server"));
+            assertEquals("812", e.extras.get("pid"));
+        }
+
+        @Test
+        @DisplayName("short-precise (microseconds) and classic syslog timestamps are accepted")
+        void otherTimestampDialects() {
+            assertEquals(LogEntry.Kind.SYSLOG,
+                parser.parse("2026-11-24T10:22:01.123456+0530 h sshd[9]: Accepted publickey").kind);
+            LogEntry classic = parser.parse("Nov  4 10:22:12 omnissiah systemd[1]: Started Daily apt.");
+            assertEquals(LogEntry.Kind.SYSLOG, classic.kind);
+            assertEquals("Nov  4 10:22:12", classic.timestamp);
+            assertEquals("systemd", classic.source);
+        }
+
+        @Test
+        @DisplayName("a payload with no stated level stays UNKNOWN rather than guessed")
+        void noLevelStaysUnknown() {
+            LogEntry e = parser.parse(
+                "2026-11-24T10:22:09+0530 h systemd-resolved[640]: Failed to send hostname reply: Connection timed out");
+            assertEquals(LogEntry.Kind.SYSLOG, e.kind);
+            assertEquals(Level.UNKNOWN, e.level);
+        }
+
+        @Test
+        @DisplayName("an explicit level marker in an unstructured payload is honoured")
+        void explicitMarker() {
+            assertEquals(Level.WARN, parser.parse(
+                "2026-11-24T10:22:11+0530 h NetworkManager[901]: <warn>  dhcp4 (eth0): request timed out").level);
+            assertEquals(Level.ERROR, parser.parse(
+                "2026-11-24T10:22:05+0530 h tailscaled[1]: 2026/11/24 10:22:05 magicsock: error: no DERP").level);
+        }
+
+        @Test
+        @DisplayName("a bare word in prose is not a severity")
+        void proseIsNotSeverity() {
+            assertEquals(Level.UNKNOWN, parser.parse(
+                "2026-11-24T10:22:12+0530 h systemd[1]: Stopped Error Reporting Service.").level);
+        }
+
+        @Test
+        @DisplayName("log4j lines with a T timestamp are not stolen by the syslog parser")
+        void log4jNotStolen() {
+            LogEntry e = parser.parse("2026-08-15T09:00:49,306 INFO SparkContext: Running Spark");
+            assertEquals(LogEntry.Kind.LOG4J, e.kind);
+            assertEquals(Level.INFO, e.level);
+        }
+
+        @Test
+        @DisplayName("journalctl banner lines print verbatim")
+        void bannerIsPlain() {
+            assertEquals(LogEntry.Kind.PLAIN, parser.parse("-- Boot 1a2b3c4d5e6f --").kind);
+        }
+    }
 }

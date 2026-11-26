@@ -1,0 +1,327 @@
+diff --git a/src/main/java/dev/sushrut/loglens/LogEntry.java b/src/main/java/dev/sushrut/loglens/LogEntry.java
+index ff32305..9f732fb 100644
+--- a/src/main/java/dev/sushrut/loglens/LogEntry.java
++++ b/src/main/java/dev/sushrut/loglens/LogEntry.java
+@@ -24,6 +24,8 @@ final class LogEntry {
+         AIRFLOW,
+         /** log4j family: Spark, Hadoop, Kafka, Flink, plus the generic fallback. */
+         LOG4J,
++        /** journalctl short output / classic syslog: header around another format. */
++        SYSLOG,
+         /** Indented / "at ..." / "Caused by:" — belongs to the entry above it. */
+         CONTINUATION,
+         /** Nothing matched; render verbatim. */
+@@ -54,7 +56,7 @@ final class LogEntry {
+     boolean structured() {
+         return kind == Kind.JSON || kind == Kind.KLOG
+             || kind == Kind.LOGFMT || kind == Kind.AIRFLOW
+-            || kind == Kind.LOG4J;
++            || kind == Kind.LOG4J || kind == Kind.SYSLOG;
+     }
+ 
+     static LogEntry plain(String raw) {
+diff --git a/src/main/java/dev/sushrut/loglens/LogLens.java b/src/main/java/dev/sushrut/loglens/LogLens.java
+index ed3433d..186fec3 100644
+--- a/src/main/java/dev/sushrut/loglens/LogLens.java
++++ b/src/main/java/dev/sushrut/loglens/LogLens.java
+@@ -133,6 +133,11 @@ public final class LogLens implements Callable<Integer> {
+             while ((line = reader.readLine()) != null) {
+                 LogEntry entry = parser.parse(line);
+ 
++                if (entry.kind == LogEntry.Kind.SYSLOG) {
++                    // A journal interleaves many daemons by nature; waiting to
++                    // see a second one would leave the first lines untagged.
++                    multiSource = true;
++                }
+                 if (entry.source != null) {
+                     if (firstSource == null) firstSource = entry.source;
+                     else if (!multiSource && !firstSource.equals(entry.source)) multiSource = true;
+diff --git a/src/main/java/dev/sushrut/loglens/LogParser.java b/src/main/java/dev/sushrut/loglens/LogParser.java
+index e7c87a2..d312309 100644
+--- a/src/main/java/dev/sushrut/loglens/LogParser.java
++++ b/src/main/java/dev/sushrut/loglens/LogParser.java
+@@ -93,6 +93,20 @@ final class LogParser {
+         "\\b(TRACE|DEBUG|INFO|INFORMATION|NOTICE|WARN|WARNING|ERROR|SEVERE|FATAL|CRITICAL)\\b",
+         Pattern.CASE_INSENSITIVE);
+ 
++    // journalctl -o short / short-iso / short-precise and classic syslog:
++    //   2026-11-24T10:22:01+0530 host dockerd[812]: payload
++    //   Nov 24 10:22:01 host sshd[1234]: payload
++    private static final Pattern SYSLOG = Pattern.compile(
++        "^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?"
++        + "|[A-Z][a-z]{2}\\s{1,2}\\d{1,2}\\s\\d{2}:\\d{2}:\\d{2})"
++        + "\\s+(\\S+)\\s+([^\\s\\[:]+)(?:\\[(\\d+)])?:\\s?(.*)$");
++    // A level a syslog payload states outright: <warn>, [ERROR], (err), or "error:".
++    // Deliberately not a bare word: "Error Reporting Service" is not an error.
++    private static final Pattern SYSLOG_LEVEL = Pattern.compile(
++        "[<\\[(]\\s*(trace|debug|info|notice|warn|warning|err|error|fatal|crit|critical)\\s*[>\\])]"
++        + "|\\b(trace|debug|info|notice|warn|warning|error|fatal|critical):",
++        Pattern.CASE_INSENSITIVE);
++
+     // klog: I0815 10:22:01.101234   1 controller.go:123] message
+     private static final Pattern KLOG = Pattern.compile(
+         "^([IWEF])\\d{4}\\s+(\\d{2}:\\d{2}:\\d{2})(?:\\.\\d+)?\\s+\\d+\\s+\\S+:\\d+]\\s?(.*)$");
+@@ -129,15 +143,7 @@ final class LogParser {
+             return LogEntry.continuation(rest).withSource(source);
+         }
+ 
+-        LogEntry entry = tryJson(rest);
+-        if (entry == null) entry = tryAirflow(rest);
+-        if (entry == null) entry = tryKlog(rest);
+-        if (entry == null) entry = tryPythonLogging(rest);
+-        if (entry == null) entry = tryLog4j(rest);
+-        if (entry == null) entry = tryLogfmt(rest);
+-        // Generic heuristic runs last: it is the most permissive matcher here,
+-        // so anything it could wrongly claim must get first refusal above.
+-        if (entry == null) entry = tryGeneric(rest);
++        LogEntry entry = tryFormats(rest, true);
+ 
+         if (entry != null) return entry.withSource(source);
+         return LogEntry.plain(line);
+@@ -174,6 +180,78 @@ final class LogParser {
+         return new String[]{null, line};
+     }
+ 
++    /**
++     * The ordered format chain. Syslog/journald sits in the middle: it is a
++     * wrapper whose payload is parsed by this same chain (minus itself), so it
++     * must come after the formats that start with their own timestamp, and
++     * before logfmt and the generic heuristic, which would otherwise claim a
++     * journald line and get it wrong.
++     */
++    private LogEntry tryFormats(String rest, boolean allowSyslog) {
++        LogEntry entry = tryJson(rest);
++        if (entry == null) entry = tryAirflow(rest);
++        if (entry == null) entry = tryKlog(rest);
++        if (entry == null) entry = tryPythonLogging(rest);
++        if (entry == null) entry = tryLog4j(rest);
++        if (entry == null && allowSyslog) entry = trySyslog(rest);
++        if (entry == null) entry = tryLogfmt(rest);
++        // Generic heuristic runs last: it is the most permissive matcher here,
++        // so anything it could wrongly claim must get first refusal above.
++        if (entry == null) entry = tryGeneric(rest);
++        return entry;
++    }
++
++    // ---- syslog / journald ---------------------------------------------------
++
++    /**
++     * {@code journalctl -o short|short-iso|short-precise} and classic syslog:
++     * a {@code timestamp host ident[pid]:} header around an arbitrary payload.
++     *
++     * The payload is often itself structured (dockerd and tailscaled emit
++     * logfmt), so it is run back through the format chain and its level,
++     * message and fields win. The ident becomes the source, which is what makes
++     * {@code --stats} "by source" and {@code --where service=sshd} work on a
++     * journal. The header's timestamp is kept in preference to any inside the
++     * payload: it is the one column every line in the stream has, in one shape.
++     *
++     * Short output drops journald's PRIORITY, so a payload that is not
++     * structured gets a level only when it states one unambiguously
++     * ({@code <warn>}, {@code [ERROR]}, {@code error:}). Anything else stays
++     * UNKNOWN rather than guessing severity from prose.
++     */
++    private LogEntry trySyslog(String rest) {
++        Matcher m = SYSLOG.matcher(rest.strip());
++        if (!m.matches()) return null;
++
++        String timestamp = m.group(1);
++        String ident = m.group(3);
++        String pid = m.group(4);
++        String body = m.group(5);
++
++        Map<String, Object> extras = new LinkedHashMap<>();
++        Level level;
++        String message;
++        String requestId = null;
++
++        LogEntry inner = tryFormats(body, false);
++        if (inner != null) {
++            extras.putAll(inner.extras);
++            level = inner.level;
++            message = inner.message;
++            requestId = inner.requestId;
++        } else {
++            message = body;
++            Matcher lv = SYSLOG_LEVEL.matcher(body);
++            level = (lv.find() && lv.start() < 120)
++                ? Level.from(lv.group(1) != null ? lv.group(1) : lv.group(2))
++                : Level.UNKNOWN;
++        }
++        if (pid != null) extras.put("pid", pid);
++
++        return LogEntry.structured(LogEntry.Kind.SYSLOG, rest, timestamp, level, message, requestId, extras)
++            .withSource(ident);
++    }
++
+     // ---- JSON ---------------------------------------------------------------
+ 
+     private LogEntry tryJson(String rest) {
+@@ -255,6 +333,8 @@ final class LogParser {
+         String message = (remainder.substring(0, lv.start()) + remainder.substring(lv.end())).strip();
+         // Tidy the separators log formats leave behind once the level is removed.
+         message = message.replaceFirst("^[\\[\\]\\-:|\\s]+", "").strip();
++        // "subsys: error: boom" loses its level word and would read "subsys: : boom".
++        message = message.replaceAll(":\\s+:", ":");
+ 
+         return logEntry(rest, ts.group(1), lv.group(1), null, null, message);
+     }
+diff --git a/src/main/java/dev/sushrut/loglens/LogRenderer.java b/src/main/java/dev/sushrut/loglens/LogRenderer.java
+index f2c17d3..9f32eb9 100644
+--- a/src/main/java/dev/sushrut/loglens/LogRenderer.java
++++ b/src/main/java/dev/sushrut/loglens/LogRenderer.java
+@@ -96,7 +96,7 @@ final class LogRenderer {
+      */
+     private static final Pattern CLOCK = Pattern.compile("\\d{2}:\\d{2}:\\d{2}");
+ 
+-    private static String shortTime(String ts) {
++    static String shortTime(String ts) {
+         Matcher m = CLOCK.matcher(ts);
+         return m.find() ? m.group() : ts;
+     }
+diff --git a/src/main/java/dev/sushrut/loglens/StatsCollector.java b/src/main/java/dev/sushrut/loglens/StatsCollector.java
+index 46f99c1..17affb2 100644
+--- a/src/main/java/dev/sushrut/loglens/StatsCollector.java
++++ b/src/main/java/dev/sushrut/loglens/StatsCollector.java
+@@ -94,9 +94,9 @@ final class StatsCollector {
+         return null;
+     }
+ 
++    /** HH:mm bucket. Uses the renderer's clock extraction so every timestamp dialect works. */
+     private static String minuteOf(String timestamp) {
+-        int t = timestamp.indexOf('T');
+-        String time = (t >= 0 && timestamp.length() >= t + 6) ? timestamp.substring(t + 1) : timestamp;
++        String time = LogRenderer.shortTime(timestamp);
+         return time.length() >= 5 ? time.substring(0, 5) : time;
+     }
+ 
+@@ -180,9 +180,7 @@ final class StatsCollector {
+     }
+ 
+     private static String shortTime(String ts) {
+-        int t = ts.indexOf('T');
+-        if (t >= 0 && ts.length() >= t + 9) return ts.substring(t + 1, t + 9);
+-        return ts;
++        return LogRenderer.shortTime(ts);
+     }
+ 
+     private static String truncate(String s, int max) {
+diff --git a/src/test/java/dev/sushrut/loglens/LogParserTest.java b/src/test/java/dev/sushrut/loglens/LogParserTest.java
+index 0ccceb1..173a80c 100644
+--- a/src/test/java/dev/sushrut/loglens/LogParserTest.java
++++ b/src/test/java/dev/sushrut/loglens/LogParserTest.java
+@@ -284,4 +284,73 @@ class LogParserTest {
+             assertEquals("ignored", e.extras.get("requestId"));
+         }
+     }
++
++    @Nested
++    @DisplayName("syslog / journald")
++    class Syslog {
++
++        @Test
++        @DisplayName("journalctl short-iso around a logfmt payload: payload level and fields win")
++        void shortIsoLogfmtPayload() {
++            LogEntry e = parser.parse("2026-11-24T10:22:01+0530 omnissiah dockerd[812]: "
++                + "time=\"2026-11-24T10:22:01.123+05:30\" level=error msg=\"resolver failed\" dns-server=1.1.1.1:53");
++            assertEquals(LogEntry.Kind.SYSLOG, e.kind);
++            assertEquals(Level.ERROR, e.level);
++            assertEquals("resolver failed", e.message);
++            assertEquals("dockerd", e.source);
++            assertEquals("2026-11-24T10:22:01+0530", e.timestamp);
++            assertEquals("1.1.1.1:53", e.extras.get("dns-server"));
++            assertEquals("812", e.extras.get("pid"));
++        }
++
++        @Test
++        @DisplayName("short-precise (microseconds) and classic syslog timestamps are accepted")
++        void otherTimestampDialects() {
++            assertEquals(LogEntry.Kind.SYSLOG,
++                parser.parse("2026-11-24T10:22:01.123456+0530 h sshd[9]: Accepted publickey").kind);
++            LogEntry classic = parser.parse("Nov  4 10:22:12 omnissiah systemd[1]: Started Daily apt.");
++            assertEquals(LogEntry.Kind.SYSLOG, classic.kind);
++            assertEquals("Nov  4 10:22:12", classic.timestamp);
++            assertEquals("systemd", classic.source);
++        }
++
++        @Test
++        @DisplayName("a payload with no stated level stays UNKNOWN rather than guessed")
++        void noLevelStaysUnknown() {
++            LogEntry e = parser.parse(
++                "2026-11-24T10:22:09+0530 h systemd-resolved[640]: Failed to send hostname reply: Connection timed out");
++            assertEquals(LogEntry.Kind.SYSLOG, e.kind);
++            assertEquals(Level.UNKNOWN, e.level);
++        }
++
++        @Test
++        @DisplayName("an explicit level marker in an unstructured payload is honoured")
++        void explicitMarker() {
++            assertEquals(Level.WARN, parser.parse(
++                "2026-11-24T10:22:11+0530 h NetworkManager[901]: <warn>  dhcp4 (eth0): request timed out").level);
++            assertEquals(Level.ERROR, parser.parse(
++                "2026-11-24T10:22:05+0530 h tailscaled[1]: 2026/11/24 10:22:05 magicsock: error: no DERP").level);
++        }
++
++        @Test
++        @DisplayName("a bare word in prose is not a severity")
++        void proseIsNotSeverity() {
++            assertEquals(Level.UNKNOWN, parser.parse(
++                "2026-11-24T10:22:12+0530 h systemd[1]: Stopped Error Reporting Service.").level);
++        }
++
++        @Test
++        @DisplayName("log4j lines with a T timestamp are not stolen by the syslog parser")
++        void log4jNotStolen() {
++            LogEntry e = parser.parse("2026-08-15T09:00:49,306 INFO SparkContext: Running Spark");
++            assertEquals(LogEntry.Kind.LOG4J, e.kind);
++            assertEquals(Level.INFO, e.level);
++        }
++
++        @Test
++        @DisplayName("journalctl banner lines print verbatim")
++        void bannerIsPlain() {
++            assertEquals(LogEntry.Kind.PLAIN, parser.parse("-- Boot 1a2b3c4d5e6f --").kind);
++        }
++    }
+ }
+diff --git a/src/test/java/dev/sushrut/loglens/StatsCollectorTest.java b/src/test/java/dev/sushrut/loglens/StatsCollectorTest.java
+new file mode 100644
+index 0000000..ff0118f
+--- /dev/null
++++ b/src/test/java/dev/sushrut/loglens/StatsCollectorTest.java
+@@ -0,0 +1,35 @@
++package dev.sushrut.loglens;
++
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class StatsCollectorTest {
++
++    private final LogParser parser = new LogParser(null);
++
++    @Test
++    @DisplayName("error peak and time range work for timestamps without a 'T' (log4j, syslog)")
++    void peakMinuteForNonIsoTimestamps() {
++        StatsCollector stats = new StatsCollector();
++        stats.add(parser.parse("2026-08-15 09:00:49,306 ERROR org.apache.hadoop.X: boom"));
++        stats.add(parser.parse("2026-08-15 09:00:51,306 ERROR org.apache.hadoop.X: boom"));
++        stats.add(parser.parse("2026-08-15 09:05:01,306 INFO org.apache.hadoop.X: fine"));
++
++        String out = stats.render(Ansi.resolve(false));
++        assertTrue(out.contains("errors peaked at 09:00"), out);
++        assertTrue(out.contains("09:00:49 → 09:05:01"), out);
++    }
++
++    @Test
++    @DisplayName("journald lines are grouped by their ident")
++    void syslogSources() {
++        StatsCollector stats = new StatsCollector();
++        stats.add(parser.parse("2026-11-24T10:22:01+0530 h dockerd[1]: level=error msg=\"x\""));
++        stats.add(parser.parse("2026-11-24T10:22:02+0530 h sshd[2]: Accepted publickey"));
++
++        String out = stats.render(Ansi.resolve(false));
++        assertTrue(out.contains("dockerd") && out.contains("sshd"), out);
++    }
++}

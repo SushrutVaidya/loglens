@@ -96,7 +96,7 @@ final class LogRenderer {
      */
     private static final Pattern CLOCK = Pattern.compile("\\d{2}:\\d{2}:\\d{2}");
 
-    private static String shortTime(String ts) {
+    static String shortTime(String ts) {
         Matcher m = CLOCK.matcher(ts);
         return m.find() ? m.group() : ts;
     }
