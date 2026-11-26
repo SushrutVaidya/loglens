@@ -353,4 +353,66 @@ class LogParserTest {
             assertEquals(LogEntry.Kind.PLAIN, parser.parse("-- Boot 1a2b3c4d5e6f --").kind);
         }
     }
+
+    @Nested
+    @DisplayName("journalctl -o json")
+    class JournaldJson {
+
+        @Test
+        @DisplayName("maps syslog priority to level and extracts fields")
+        void mapsPriorityAndFields() {
+            // PRIORITY=3 (err), MESSAGE, SYSLOG_IDENTIFIER, __REALTIME_TIMESTAMP (micros since epoch)
+            String json = "{\"MESSAGE\":\"Failed to connect\",\"PRIORITY\":\"3\",\"SYSLOG_IDENTIFIER\":\"sshd\","
+                + "\"__REALTIME_TIMESTAMP\":\"1732447321123456\",\"_HOSTNAME\":\"host\",\"_UID\":\"0\"}";
+            LogEntry e = parser.parse(json);
+            assertEquals(LogEntry.Kind.JSON, e.kind);
+            assertEquals(Level.ERROR, e.level);
+            assertEquals("Failed to connect", e.message);
+            assertEquals("sshd", e.source);
+            assertNotNull(e.timestamp); // converted from micros
+            assertEquals("0", e.extras.get("_UID"));
+            // Journal fields removed from extras
+            assertNull(e.extras.get("MESSAGE"));
+            assertNull(e.extras.get("PRIORITY"));
+            assertNull(e.extras.get("SYSLOG_IDENTIFIER"));
+        }
+
+        @Test
+        @DisplayName("all syslog priority levels map correctly")
+        void allPriorityLevels() {
+            assertEquals(Level.FATAL, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"0\"}").level); // emerg
+            assertEquals(Level.FATAL, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"1\"}").level); // alert
+            assertEquals(Level.FATAL, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"2\"}").level); // crit
+            assertEquals(Level.ERROR, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"3\"}").level); // err
+            assertEquals(Level.WARN, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"4\"}").level);  // warning
+            assertEquals(Level.INFO, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"5\"}").level);  // notice
+            assertEquals(Level.INFO, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"6\"}").level);  // info
+            assertEquals(Level.DEBUG, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"7\"}").level); // debug
+        }
+
+        @Test
+        @DisplayName("unknown priority falls back to Level.from")
+        void unknownPriorityFallback() {
+            assertEquals(Level.UNKNOWN, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"99\"}").level);
+        }
+
+        @Test
+        @DisplayName("non-journal JSON without MESSAGE/PRIORITY falls through to generic JSON")
+        void nonJournalJsonFallsThrough() {
+            LogEntry e = parser.parse("{\"level\":\"INFO\",\"message\":\"hello\",\"service\":\"api\"}");
+            assertEquals(LogEntry.Kind.JSON, e.kind);
+            assertEquals(Level.INFO, e.level);
+            assertEquals("hello", e.message);
+            assertEquals("api", e.extras.get("service"));
+        }
+
+        @Test
+        @DisplayName("requestId detection works in journal JSON")
+        void requestIdDetection() {
+            String json = "{\"MESSAGE\":\"request done\",\"PRIORITY\":\"6\",\"requestId\":\"abc-123\"}";
+            LogEntry e = parser.parse(json);
+            assertEquals("abc-123", e.requestId);
+            assertNull(e.extras.get("requestId"));
+        }
+    }
 }

@@ -3,6 +3,9 @@ package dev.sushrut.loglens;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -188,7 +191,8 @@ final class LogParser {
      * journald line and get it wrong.
      */
     private LogEntry tryFormats(String rest, boolean allowSyslog) {
-        LogEntry entry = tryJson(rest);
+        LogEntry entry = tryJournaldJson(rest);
+        if (entry == null) entry = tryJson(rest);
         if (entry == null) entry = tryAirflow(rest);
         if (entry == null) entry = tryKlog(rest);
         if (entry == null) entry = tryPythonLogging(rest);
@@ -250,6 +254,70 @@ final class LogParser {
 
         return LogEntry.structured(LogEntry.Kind.SYSLOG, rest, timestamp, level, message, requestId, extras)
             .withSource(ident);
+    }
+
+    // ---- journalctl -o json -------------------------------------------------
+    // journalctl -o json emits uppercase keys:
+    //   MESSAGE, PRIORITY (syslog 0-7), SYSLOG_IDENTIFIER, _HOSTNAME,
+    //   __REALTIME_TIMESTAMP (microseconds since epoch), _UID, _GID, _SYSTEMD_UNIT, etc.
+    // Syslog priority differs from our Level: 3=err, 4=warning, 6=info, 7=debug.
+    // We map these explicitly and preserve other fields in extras.
+    private LogEntry tryJournaldJson(String rest) {
+        String trimmed = rest.strip();
+        if (trimmed.isEmpty() || trimmed.charAt(0) != '{') return null;
+
+        JsonNode root;
+        try {
+            root = MAPPER.readTree(trimmed);
+        } catch (Exception notJson) {
+            return null;
+        }
+        if (root == null || !root.isObject()) return null;
+
+        // Must have MESSAGE and PRIORITY to be a journalctl JSON entry
+        if (!root.has("MESSAGE") || !root.has("PRIORITY")) return null;
+
+        Map<String, Object> extras = new LinkedHashMap<>();
+        root.properties().forEach(e -> extras.put(e.getKey(), scalarOrNode(e.getValue())));
+
+        // Map syslog priority (0-7) to our Level
+        // 0=emerg, 1=alert, 2=crit, 3=err, 4=warning, 5=notice, 6=info, 7=debug
+        String priority = root.path("PRIORITY").asText("");
+        Level level = switch (priority) {
+            case "0", "1", "2" -> Level.FATAL;
+            case "3" -> Level.ERROR;
+            case "4" -> Level.WARN;
+            case "5" -> Level.INFO;
+            case "6" -> Level.INFO;
+            case "7" -> Level.DEBUG;
+            default -> Level.from(priority);
+        };
+
+        String message = root.path("MESSAGE").asText("");
+        String timestamp = null;
+        if (root.has("__REALTIME_TIMESTAMP")) {
+            // microseconds since epoch -> ISO-8601
+            try {
+                long micros = root.path("__REALTIME_TIMESTAMP").asLong();
+                Instant instant = Instant.ofEpochMilli(micros / 1000);
+                timestamp = instant.atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+            } catch (Exception ignore) {
+                // fall through to no timestamp
+            }
+        }
+
+        String source = root.path("SYSLOG_IDENTIFIER").asText(null);
+        String requestId = takeFirst(extras, requestIdKeys);
+
+        // Remove the well-known journal fields from extras since we've lifted them
+        extras.remove("MESSAGE");
+        extras.remove("PRIORITY");
+        extras.remove("SYSLOG_IDENTIFIER");
+        extras.remove("_HOSTNAME");
+        extras.remove("__REALTIME_TIMESTAMP");
+
+        return LogEntry.structured(LogEntry.Kind.JSON, rest, timestamp, level, message, requestId, extras)
+            .withSource(source);
     }
 
     // ---- JSON ---------------------------------------------------------------
