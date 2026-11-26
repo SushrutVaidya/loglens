@@ -94,9 +94,9 @@ final class StatsCollector {
         return null;
     }
 
+    /** HH:mm bucket. Uses the renderer's clock extraction so every timestamp dialect works. */
     private static String minuteOf(String timestamp) {
-        int t = timestamp.indexOf('T');
-        String time = (t >= 0 && timestamp.length() >= t + 6) ? timestamp.substring(t + 1) : timestamp;
+        String time = LogRenderer.shortTime(timestamp);
         return time.length() >= 5 ? time.substring(0, 5) : time;
     }
 
@@ -180,9 +180,7 @@ final class StatsCollector {
     }
 
     private static String shortTime(String ts) {
-        int t = ts.indexOf('T');
-        if (t >= 0 && ts.length() >= t + 9) return ts.substring(t + 1, t + 9);
-        return ts;
+        return LogRenderer.shortTime(ts);
     }
 
     private static String truncate(String s, int max) {

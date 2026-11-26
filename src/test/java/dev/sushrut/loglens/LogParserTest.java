@@ -284,4 +284,135 @@ class LogParserTest {
             assertEquals("ignored", e.extras.get("requestId"));
         }
     }
+
+    @Nested
+    @DisplayName("syslog / journald")
+    class Syslog {
+
+        @Test
+        @DisplayName("journalctl short-iso around a logfmt payload: payload level and fields win")
+        void shortIsoLogfmtPayload() {
+            LogEntry e = parser.parse("2026-11-24T10:22:01+0530 omnissiah dockerd[812]: "
+                + "time=\"2026-11-24T10:22:01.123+05:30\" level=error msg=\"resolver failed\" dns-server=1.1.1.1:53");
+            assertEquals(LogEntry.Kind.SYSLOG, e.kind);
+            assertEquals(Level.ERROR, e.level);
+            assertEquals("resolver failed", e.message);
+            assertEquals("dockerd", e.source);
+            assertEquals("2026-11-24T10:22:01+0530", e.timestamp);
+            assertEquals("1.1.1.1:53", e.extras.get("dns-server"));
+            assertEquals("812", e.extras.get("pid"));
+        }
+
+        @Test
+        @DisplayName("short-precise (microseconds) and classic syslog timestamps are accepted")
+        void otherTimestampDialects() {
+            assertEquals(LogEntry.Kind.SYSLOG,
+                parser.parse("2026-11-24T10:22:01.123456+0530 h sshd[9]: Accepted publickey").kind);
+            LogEntry classic = parser.parse("Nov  4 10:22:12 omnissiah systemd[1]: Started Daily apt.");
+            assertEquals(LogEntry.Kind.SYSLOG, classic.kind);
+            assertEquals("Nov  4 10:22:12", classic.timestamp);
+            assertEquals("systemd", classic.source);
+        }
+
+        @Test
+        @DisplayName("a payload with no stated level stays UNKNOWN rather than guessed")
+        void noLevelStaysUnknown() {
+            LogEntry e = parser.parse(
+                "2026-11-24T10:22:09+0530 h systemd-resolved[640]: Failed to send hostname reply: Connection timed out");
+            assertEquals(LogEntry.Kind.SYSLOG, e.kind);
+            assertEquals(Level.UNKNOWN, e.level);
+        }
+
+        @Test
+        @DisplayName("an explicit level marker in an unstructured payload is honoured")
+        void explicitMarker() {
+            assertEquals(Level.WARN, parser.parse(
+                "2026-11-24T10:22:11+0530 h NetworkManager[901]: <warn>  dhcp4 (eth0): request timed out").level);
+            assertEquals(Level.ERROR, parser.parse(
+                "2026-11-24T10:22:05+0530 h tailscaled[1]: 2026/11/24 10:22:05 magicsock: error: no DERP").level);
+        }
+
+        @Test
+        @DisplayName("a bare word in prose is not a severity")
+        void proseIsNotSeverity() {
+            assertEquals(Level.UNKNOWN, parser.parse(
+                "2026-11-24T10:22:12+0530 h systemd[1]: Stopped Error Reporting Service.").level);
+        }
+
+        @Test
+        @DisplayName("log4j lines with a T timestamp are not stolen by the syslog parser")
+        void log4jNotStolen() {
+            LogEntry e = parser.parse("2026-08-15T09:00:49,306 INFO SparkContext: Running Spark");
+            assertEquals(LogEntry.Kind.LOG4J, e.kind);
+            assertEquals(Level.INFO, e.level);
+        }
+
+        @Test
+        @DisplayName("journalctl banner lines print verbatim")
+        void bannerIsPlain() {
+            assertEquals(LogEntry.Kind.PLAIN, parser.parse("-- Boot 1a2b3c4d5e6f --").kind);
+        }
+    }
+
+    @Nested
+    @DisplayName("journalctl -o json")
+    class JournaldJson {
+
+        @Test
+        @DisplayName("maps syslog priority to level and extracts fields")
+        void mapsPriorityAndFields() {
+            // PRIORITY=3 (err), MESSAGE, SYSLOG_IDENTIFIER, __REALTIME_TIMESTAMP (micros since epoch)
+            String json = "{\"MESSAGE\":\"Failed to connect\",\"PRIORITY\":\"3\",\"SYSLOG_IDENTIFIER\":\"sshd\","
+                + "\"__REALTIME_TIMESTAMP\":\"1732447321123456\",\"_HOSTNAME\":\"host\",\"_UID\":\"0\"}";
+            LogEntry e = parser.parse(json);
+            assertEquals(LogEntry.Kind.JSON, e.kind);
+            assertEquals(Level.ERROR, e.level);
+            assertEquals("Failed to connect", e.message);
+            assertEquals("sshd", e.source);
+            assertNotNull(e.timestamp); // converted from micros
+            assertEquals("0", e.extras.get("_UID"));
+            // Journal fields removed from extras
+            assertNull(e.extras.get("MESSAGE"));
+            assertNull(e.extras.get("PRIORITY"));
+            assertNull(e.extras.get("SYSLOG_IDENTIFIER"));
+        }
+
+        @Test
+        @DisplayName("all syslog priority levels map correctly")
+        void allPriorityLevels() {
+            assertEquals(Level.FATAL, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"0\"}").level); // emerg
+            assertEquals(Level.FATAL, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"1\"}").level); // alert
+            assertEquals(Level.FATAL, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"2\"}").level); // crit
+            assertEquals(Level.ERROR, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"3\"}").level); // err
+            assertEquals(Level.WARN, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"4\"}").level);  // warning
+            assertEquals(Level.INFO, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"5\"}").level);  // notice
+            assertEquals(Level.INFO, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"6\"}").level);  // info
+            assertEquals(Level.DEBUG, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"7\"}").level); // debug
+        }
+
+        @Test
+        @DisplayName("unknown priority falls back to Level.from")
+        void unknownPriorityFallback() {
+            assertEquals(Level.UNKNOWN, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"99\"}").level);
+        }
+
+        @Test
+        @DisplayName("non-journal JSON without MESSAGE/PRIORITY falls through to generic JSON")
+        void nonJournalJsonFallsThrough() {
+            LogEntry e = parser.parse("{\"level\":\"INFO\",\"message\":\"hello\",\"service\":\"api\"}");
+            assertEquals(LogEntry.Kind.JSON, e.kind);
+            assertEquals(Level.INFO, e.level);
+            assertEquals("hello", e.message);
+            assertEquals("api", e.extras.get("service"));
+        }
+
+        @Test
+        @DisplayName("requestId detection works in journal JSON")
+        void requestIdDetection() {
+            String json = "{\"MESSAGE\":\"request done\",\"PRIORITY\":\"6\",\"requestId\":\"abc-123\"}";
+            LogEntry e = parser.parse(json);
+            assertEquals("abc-123", e.requestId);
+            assertNull(e.extras.get("requestId"));
+        }
+    }
 }

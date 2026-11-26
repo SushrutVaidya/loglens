@@ -166,6 +166,8 @@ loglens -w service=api --trace 9f2c-a1 app.log    # stack them (AND)
 | Airflow (`[ts] {file:line} LEVEL - msg`) | Parsed |
 | log4j family — Spark, Hadoop, Kafka, Hive, Flink | Parsed |
 | Python logging (`ts - logger - LEVEL - msg`) | Parsed |
+| journalctl `-o short-iso` / syslog (`ts host ident[pid]: msg`) | Parsed |
+| journalctl `-o json` (`{"MESSAGE": "...", "PRIORITY": "3", ...}`) | Parsed |
 | Generic `timestamp + level` | Fallback |
 | `kubectl logs --prefix` / `docker compose` prefixes | Stripped, kept as source tag |
 | JVM stack traces | Attached to their parent entry |

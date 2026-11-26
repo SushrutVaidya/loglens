@@ -133,6 +133,11 @@ public final class LogLens implements Callable<Integer> {
             while ((line = reader.readLine()) != null) {
                 LogEntry entry = parser.parse(line);
 
+                if (entry.kind == LogEntry.Kind.SYSLOG) {
+                    // A journal interleaves many daemons by nature; waiting to
+                    // see a second one would leave the first lines untagged.
+                    multiSource = true;
+                }
                 if (entry.source != null) {
                     if (firstSource == null) firstSource = entry.source;
                     else if (!multiSource && !firstSource.equals(entry.source)) multiSource = true;
