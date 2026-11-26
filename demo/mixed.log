@@ -5,6 +5,3 @@
 E0815 09:00:57.001456    1 kubelet.go:1893] Failed to sync pod
 level=info ts=2026-08-15T09:00:58.306Z caller=main.go:123 msg="Server is ready"
 {"timestamp":"2026-08-15T09:00:59Z","level":"ERROR","message":"payment declined","service":"billing"}
-{"MESSAGE":"Failed to connect to peer","PRIORITY":"3","SYSLOG_IDENTIFIER":"tailscaled","__REALTIME_TIMESTAMP":"1732447321123456","_HOSTNAME":"host","_UID":"0"}
-{"MESSAGE":"DHCP request timed out","PRIORITY":"4","SYSLOG_IDENTIFIER":"NetworkManager","__REALTIME_TIMESTAMP":"1732447330000000"}
-{"MESSAGE":"Started daily cleanup","PRIORITY":"6","SYSLOG_IDENTIFIER":"systemd","__REALTIME_TIMESTAMP":"1732447340000000"}
