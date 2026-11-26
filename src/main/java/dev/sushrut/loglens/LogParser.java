@@ -3,10 +3,15 @@ package dev.sushrut.loglens;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -266,9 +271,128 @@ final class LogParser {
         }
         if (root == null || !root.isObject()) return null;
 
+        // journalctl -o json emits uppercase keys:
+        //   MESSAGE, PRIORITY (syslog 0-7), SYSLOG_IDENTIFIER, _HOSTNAME,
+        //   __REALTIME_TIMESTAMP (microseconds since epoch), _UID, _GID, _SYSTEMD_UNIT, etc.
+        // Syslog priority differs from our Level: 3=err, 4=warning, 6=info, 7=debug.
+        // We map these explicitly and preserve other fields in extras.
+        if (root.has("MESSAGE") && root.has("PRIORITY")) {
+            return buildJournaldJson(root, rest);
+        }
+
         Map<String, Object> extras = new LinkedHashMap<>();
         root.properties().forEach(e -> extras.put(e.getKey(), scalarOrNode(e.getValue())));
         return build(LogEntry.Kind.JSON, rest, extras);
+    }
+
+    /**
+     * Builds a LogEntry from a journalctl -o json node.
+     *
+     * __REALTIME_TIMESTAMP is converted with ZoneId.systemDefault(), so displayed
+     * clock time follows the machine's timezone (this matches journalctl's own output).
+     */
+    private LogEntry buildJournaldJson(JsonNode root, String raw) {
+        // Extract message (handle byte arrays, null, missing)
+        String message = extractMessage(root.path("MESSAGE"));
+
+        // Map syslog priority (0-7) to our Level
+        // 0=emerg, 1=alert, 2=crit, 3=err, 4=warning, 5=notice, 6=info, 7=debug
+        String priority = root.path("PRIORITY").asText("");
+        Level level = switch (priority) {
+            case "0", "1", "2" -> Level.FATAL;
+            case "3" -> Level.ERROR;
+            case "4" -> Level.WARN;
+            case "5" -> Level.INFO;
+            case "6" -> Level.INFO;
+            case "7" -> Level.DEBUG;
+            default -> Level.from(priority);
+        };
+
+        // Convert __REALTIME_TIMESTAMP (microseconds since epoch) to ISO-8601
+        String timestamp = null;
+        if (root.has("__REALTIME_TIMESTAMP")) {
+            try {
+                long micros = root.path("__REALTIME_TIMESTAMP").asLong();
+                Instant instant = Instant.ofEpochMilli(micros / 1000);
+                timestamp = instant.atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+            } catch (Exception ignore) {
+                // fall through to no timestamp
+            }
+        }
+
+        String source = root.path("SYSLOG_IDENTIFIER").asText(null);
+
+        // Collect all fields first, then filter out journald-internal ones
+        Map<String, Object> extras = new LinkedHashMap<>();
+        root.properties().forEach(e -> extras.put(e.getKey(), scalarOrNode(e.getValue())));
+
+        // Extract requestId BEFORE dropping fields
+        String requestId = takeFirst(extras, requestIdKeys);
+
+        // Drop journald-internal fields (keys starting with _ or __)
+        // Keep _PID and _SYSTEMD_UNIT as they help triage
+        // Also drop known noisy internal fields
+        Set<String> dropKeys = new HashSet<>();
+        for (String key : extras.keySet()) {
+            if (key.startsWith("_") || key.startsWith("__")) {
+                if (!key.equals("_PID") && !key.equals("_SYSTEMD_UNIT")) {
+                    dropKeys.add(key);
+                }
+            }
+            // Drop other known internal/noisy fields
+            if (key.equals("SYSLOG_FACILITY") || key.equals("SYSLOG_TIMESTAMP") ||
+                key.equals("SYSLOG_RAW") || key.equals("MESSAGE_ID")) {
+                dropKeys.add(key);
+            }
+        }
+        dropKeys.forEach(extras::remove);
+
+        // Remove the well-known journal fields we've lifted
+        extras.remove("MESSAGE");
+        extras.remove("PRIORITY");
+        extras.remove("SYSLOG_IDENTIFIER");
+        extras.remove("_HOSTNAME");
+        extras.remove("__REALTIME_TIMESTAMP");
+
+        return LogEntry.structured(LogEntry.Kind.JSON, raw, timestamp, level, message, requestId, extras)
+            .withSource(source);
+    }
+
+    /**
+     * Extracts message from journalctl MESSAGE field.
+     * Handles: string, byte array (decodes as UTF-8), null/empty, array of ints.
+     * Returns placeholder for binary/empty, null for absent.
+     */
+    private static String extractMessage(JsonNode messageNode) {
+        if (messageNode.isMissingNode() || messageNode.isNull()) {
+            return null;
+        }
+        if (messageNode.isTextual()) {
+            String s = messageNode.asText();
+            return s.isEmpty() ? null : s;
+        }
+        if (messageNode.isArray()) {
+            // Byte array: decode as UTF-8
+            StringBuilder sb = new StringBuilder();
+            boolean valid = false;
+            for (JsonNode n : messageNode) {
+                if (n.isInt()) {
+                    int b = n.asInt();
+                    if (b >= 0 && b <= 255) {
+                        sb.append((char) b);
+                        valid = true;
+                    }
+                }
+            }
+            if (!valid) {
+                return "[binary 0 bytes]";
+            }
+            String decoded = sb.toString();
+            return decoded.isEmpty() ? "[binary 0 bytes]" : decoded;
+        }
+        // Fallback: toString
+        String s = messageNode.toString();
+        return s.isEmpty() ? null : s;
     }
 
     // ---- Airflow ------------------------------------------------------------

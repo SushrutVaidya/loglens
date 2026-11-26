@@ -353,4 +353,143 @@ class LogParserTest {
             assertEquals(LogEntry.Kind.PLAIN, parser.parse("-- Boot 1a2b3c4d5e6f --").kind);
         }
     }
+
+    @Nested
+    @DisplayName("journalctl -o json")
+    class JournaldJson {
+
+        @Test
+        @DisplayName("maps syslog priority to level and extracts fields")
+        void mapsPriorityAndFields() {
+            // PRIORITY=3 (err), MESSAGE, SYSLOG_IDENTIFIER, __REALTIME_TIMESTAMP (micros since epoch)
+            String json = "{\"MESSAGE\":\"Failed to connect\",\"PRIORITY\":\"3\",\"SYSLOG_IDENTIFIER\":\"sshd\","
+                + "\"__REALTIME_TIMESTAMP\":\"1732447321123456\",\"_HOSTNAME\":\"host\",\"_PID\":\"1234\"}";
+            LogEntry e = parser.parse(json);
+            assertEquals(LogEntry.Kind.JSON, e.kind);
+            assertEquals(Level.ERROR, e.level);
+            assertEquals("Failed to connect", e.message);
+            assertEquals("sshd", e.source);
+            assertNotNull(e.timestamp); // converted from micros
+            // _PID is kept (explicitly allowed), _UID is dropped (starts with _)
+            assertEquals("1234", e.extras.get("_PID"));
+            assertNull(e.extras.get("_UID"));
+            // Journal fields removed from extras
+            assertNull(e.extras.get("MESSAGE"));
+            assertNull(e.extras.get("PRIORITY"));
+            assertNull(e.extras.get("SYSLOG_IDENTIFIER"));
+        }
+
+        @Test
+        @DisplayName("all syslog priority levels map correctly")
+        void allPriorityLevels() {
+            assertEquals(Level.FATAL, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"0\"}").level); // emerg
+            assertEquals(Level.FATAL, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"1\"}").level); // alert
+            assertEquals(Level.FATAL, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"2\"}").level); // crit
+            assertEquals(Level.ERROR, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"3\"}").level); // err
+            assertEquals(Level.WARN, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"4\"}").level);  // warning
+            assertEquals(Level.INFO, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"5\"}").level);  // notice
+            assertEquals(Level.INFO, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"6\"}").level);  // info
+            assertEquals(Level.DEBUG, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"7\"}").level); // debug
+        }
+
+        @Test
+        @DisplayName("unknown priority falls back to Level.from")
+        void unknownPriorityFallback() {
+            assertEquals(Level.UNKNOWN, parser.parse("{\"MESSAGE\":\"x\",\"PRIORITY\":\"99\"}").level);
+        }
+
+        @Test
+        @DisplayName("non-journal JSON without MESSAGE/PRIORITY falls through to generic JSON")
+        void nonJournalJsonFallsThrough() {
+            LogEntry e = parser.parse("{\"level\":\"INFO\",\"message\":\"hello\",\"service\":\"api\"}");
+            assertEquals(LogEntry.Kind.JSON, e.kind);
+            assertEquals(Level.INFO, e.level);
+            assertEquals("hello", e.message);
+            assertEquals("api", e.extras.get("service"));
+        }
+
+        @Test
+        @DisplayName("requestId detection works in journal JSON")
+        void requestIdDetection() {
+            String json = "{\"MESSAGE\":\"request done\",\"PRIORITY\":\"6\",\"requestId\":\"abc-123\"}";
+            LogEntry e = parser.parse(json);
+            assertEquals("abc-123", e.requestId);
+            assertNull(e.extras.get("requestId"));
+        }
+
+        @Test
+        @DisplayName("drops journald internal fields, keeps _PID and _SYSTEMD_UNIT")
+        void dropsInternalFields() {
+            String json = "{\"MESSAGE\":\"test\",\"PRIORITY\":\"6\",\"SYSLOG_IDENTIFIER\":\"sshd\","
+                + "\"__REALTIME_TIMESTAMP\":\"1732447321123456\",\"_PID\":\"1234\",\"_SYSTEMD_UNIT\":\"ssh.service\","
+                + "\"__CURSOR\":\"abc\",\"_BOOT_ID\":\"xyz\",\"_MACHINE_ID\":\"mid\",\"_HOSTNAME\":\"host\","
+                + "\"_TRANSPORT\":\"journal\",\"_UID\":\"0\",\"_GID\":\"0\",\"_COMM\":\"sshd\","
+                + "\"_EXE\":\"/usr/bin/sshd\",\"_CMDLINE\":\"sshd -D\",\"SYSLOG_FACILITY\":\"4\","
+                + "\"SYSLOG_TIMESTAMP\":\"Nov 24 10:22:01\",\"SYSLOG_RAW\":\"raw\",\"MESSAGE_ID\":\"abc123\","
+                + "\"app_field\":\"keep-me\"}";
+            LogEntry e = parser.parse(json);
+            assertEquals(LogEntry.Kind.JSON, e.kind);
+            assertEquals("test", e.message);
+            assertEquals("sshd", e.source);
+            // Kept fields
+            assertEquals("1234", e.extras.get("_PID"));
+            assertEquals("ssh.service", e.extras.get("_SYSTEMD_UNIT"));
+            assertEquals("keep-me", e.extras.get("app_field"));
+            // Dropped fields
+            assertNull(e.extras.get("__CURSOR"));
+            assertNull(e.extras.get("_BOOT_ID"));
+            assertNull(e.extras.get("_MACHINE_ID"));
+            assertNull(e.extras.get("_HOSTNAME"));
+            assertNull(e.extras.get("_TRANSPORT"));
+            assertNull(e.extras.get("_UID"));
+            assertNull(e.extras.get("_GID"));
+            assertNull(e.extras.get("_COMM"));
+            assertNull(e.extras.get("_EXE"));
+            assertNull(e.extras.get("_CMDLINE"));
+            assertNull(e.extras.get("SYSLOG_FACILITY"));
+            assertNull(e.extras.get("SYSLOG_TIMESTAMP"));
+            assertNull(e.extras.get("SYSLOG_RAW"));
+            assertNull(e.extras.get("MESSAGE_ID"));
+        }
+
+        @Test
+        @DisplayName("MESSAGE as byte array decodes to UTF-8 string")
+        void messageAsByteArray() {
+            // [104, 105] = "hi"
+            LogEntry e = parser.parse("{\"MESSAGE\":[104,105],\"PRIORITY\":\"6\"}");
+            assertEquals("hi", e.message);
+            assertEquals(Level.INFO, e.level);
+        }
+
+        @Test
+        @DisplayName("MESSAGE as empty byte array gives placeholder")
+        void messageAsEmptyByteArray() {
+            LogEntry e = parser.parse("{\"MESSAGE\":[],\"PRIORITY\":\"6\"}");
+            assertEquals("[binary 0 bytes]", e.message);
+        }
+
+        @Test
+        @DisplayName("MESSAGE as byte array with invalid bytes still decodes valid ones")
+        void messageAsByteArrayWithInvalid() {
+            // [104, 256, 105] = "hi" (256 is invalid, skipped)
+            LogEntry e = parser.parse("{\"MESSAGE\":[104,256,105],\"PRIORITY\":\"6\"}");
+            assertEquals("hi", e.message);
+        }
+
+        @Test
+        @DisplayName("MESSAGE null or absent does not crash")
+        void messageNullOrAbsent() {
+            // MESSAGE null - treated as journal JSON with null message
+            LogEntry e1 = parser.parse("{\"MESSAGE\":null,\"PRIORITY\":\"6\"}");
+            assertNull(e1.message);
+            assertEquals(Level.INFO, e1.level);
+            assertEquals(LogEntry.Kind.JSON, e1.kind);
+
+            // MESSAGE absent entirely - not treated as journal JSON (falls through to generic JSON)
+            // Generic JSON path accepts any JSON object, so it's Kind.JSON with UNKNOWN level
+            LogEntry e2 = parser.parse("{\"PRIORITY\":\"6\",\"other\":\"field\"}");
+            assertEquals(LogEntry.Kind.JSON, e2.kind);
+            assertEquals(Level.UNKNOWN, e2.level);
+        }
+    }
 }
