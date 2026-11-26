@@ -477,6 +477,14 @@ class LogParserTest {
         }
 
         @Test
+        @DisplayName("MESSAGE as UTF-8 multi-byte sequence decodes correctly")
+        void messageAsUtf8MultiByte() {
+            // café = [99, 97, 102, 195, 169] (UTF-8: c a f é)
+            LogEntry e = parser.parse("{\"MESSAGE\":[99,97,102,195,169],\"PRIORITY\":\"6\"}");
+            assertEquals("café", e.message);
+        }
+
+        @Test
         @DisplayName("MESSAGE null or absent does not crash")
         void messageNullOrAbsent() {
             // MESSAGE null - treated as journal JSON with null message

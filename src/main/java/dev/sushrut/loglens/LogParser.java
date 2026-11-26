@@ -3,6 +3,8 @@ package dev.sushrut.loglens;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -373,13 +375,13 @@ final class LogParser {
         }
         if (messageNode.isArray()) {
             // Byte array: decode as UTF-8
-            StringBuilder sb = new StringBuilder();
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             boolean valid = false;
             for (JsonNode n : messageNode) {
                 if (n.isInt()) {
                     int b = n.asInt();
                     if (b >= 0 && b <= 255) {
-                        sb.append((char) b);
+                        bytes.write(b);
                         valid = true;
                     }
                 }
@@ -387,8 +389,11 @@ final class LogParser {
             if (!valid) {
                 return "[binary 0 bytes]";
             }
-            String decoded = sb.toString();
-            return decoded.isEmpty() ? "[binary 0 bytes]" : decoded;
+            byte[] byteArray = bytes.toByteArray();
+            if (byteArray.length == 0) {
+                return "[binary 0 bytes]";
+            }
+            return new String(byteArray, StandardCharsets.UTF_8);
         }
         // Fallback: toString
         String s = messageNode.toString();
