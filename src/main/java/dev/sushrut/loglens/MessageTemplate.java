@@ -55,6 +55,13 @@ final class MessageTemplate {
         // with every null to merge one recurring Airflow event would over-collapse
         // templates everywhere else.
         new Rule(Pattern.compile("\\b(?:None|null|nil|NULL)\\b"), "<null>"),
+        // Trailing rate-limit counters: (N dropped), (N suppressed), (N duplicates),
+        // (N dups), (N repeated), (N omitted) at END of message. Must run before
+        // the generic number rule so the counter digits don't become <num>.
+        new Rule(Pattern.compile("\\s*\\(\\d+\\s+(?:dropped|suppressed|duplicates|dups|repeated|omitted)\\)\\s*$"), ""),
+        // syslog "last message repeated N times" / "last message repeated N time"
+        // at END of message. Must run before the generic number rule.
+        new Rule(Pattern.compile("(?:\\s+|^)last message repeated \\d+ times?\\s*$"), ""),
         // Numbers last, so every rule above gets first refusal on its digits.
         // No trailing \b: durations and sizes carry unit suffixes ("30012ms",
         // "512MiB") and \b fails between a digit and a letter, which left the
