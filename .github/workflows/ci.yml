@@ -23,4 +23,4 @@ jobs:
         run: mvn -B -ntp verify
 
       - name: Smoke test the jar
-        run: java -jar target/loglens.jar demo/mixed.log --stats --quiet
+        run: ./scripts/parse-smoke-test.sh "java -jar target/loglens.jar"
