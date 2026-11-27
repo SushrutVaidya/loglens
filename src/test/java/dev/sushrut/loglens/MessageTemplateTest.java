@@ -121,6 +121,16 @@ class MessageTemplateTest {
             String collapsed = MessageTemplate.collapse(msg);
             assertEquals(msg, collapsed, "legitimate parenthetical should not be stripped");
         }
+
+        @Test
+        @DisplayName("syslog 'last message repeated N times' groups together")
+        void syslogRepeatedGroups() {
+            String a = "connection refused";
+            String b = "connection refused last message repeated 12 times";
+            String c = "connection refused last message repeated 1 time";
+            assertEquals(MessageTemplate.collapse(a), MessageTemplate.collapse(b));
+            assertEquals(MessageTemplate.collapse(a), MessageTemplate.collapse(c));
+        }
     }
 
     @Nested
