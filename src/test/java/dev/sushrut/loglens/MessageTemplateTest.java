@@ -86,6 +86,41 @@ class MessageTemplateTest {
                 MessageTemplate.collapse("disk  quota\texceeded"),
                 MessageTemplate.collapse("disk quota exceeded"));
         }
+
+        @Test
+        @DisplayName("rate-limit counters group together")
+        void rateLimitCountersGroup() {
+            String a = "[RATELIMIT] format(\"control: bootstrapDNS(%q, %q) for %q error: %v\")";
+            String b = "[RATELIMIT] format(\"control: bootstrapDNS(%q, %q) for %q error: %v\") (79 dropped)";
+            assertEquals(MessageTemplate.collapse(a), MessageTemplate.collapse(b));
+        }
+
+        @Test
+        @DisplayName("all counter variants group: dropped, suppressed, duplicates, dups, repeated, omitted")
+        void allCounterVariantsGroup() {
+            String base = "error: connection refused";
+            String dropped = "error: connection refused (42 dropped)";
+            String suppressed = "error: connection refused (123 suppressed)";
+            String duplicates = "error: connection refused (5 duplicates)";
+            String dups = "error: connection refused (5 dups)";
+            String repeated = "error: connection refused (7 repeated)";
+            String omitted = "error: connection refused (9 omitted)";
+            String expected = MessageTemplate.collapse(base);
+            assertEquals(expected, MessageTemplate.collapse(dropped));
+            assertEquals(expected, MessageTemplate.collapse(suppressed));
+            assertEquals(expected, MessageTemplate.collapse(duplicates));
+            assertEquals(expected, MessageTemplate.collapse(dups));
+            assertEquals(expected, MessageTemplate.collapse(repeated));
+            assertEquals(expected, MessageTemplate.collapse(omitted));
+        }
+
+        @Test
+        @DisplayName("legitimate trailing parenthetical is unchanged")
+        void legitimateParenUnchanged() {
+            String msg = "operation failed (see docs)";
+            String collapsed = MessageTemplate.collapse(msg);
+            assertEquals(msg, collapsed, "legitimate parenthetical should not be stripped");
+        }
     }
 
     @Nested
