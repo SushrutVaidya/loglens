@@ -1,0 +1,2 @@
+# Ensure scripts have LF line endings
+scripts/* text=auto eol=lf

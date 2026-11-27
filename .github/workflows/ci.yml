@@ -22,5 +22,8 @@ jobs:
       - name: Build and test
         run: mvn -B -ntp verify
 
-      - name: Smoke test the jar
+      - name: Smoke test the jar (parser)
+        run: ./scripts/parse-smoke-test.sh "java -jar target/loglens.jar"
+
+      - name: Smoke test the jar (stats)
         run: java -jar target/loglens.jar demo/mixed.log --stats --quiet
