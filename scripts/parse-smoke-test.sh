@@ -31,9 +31,13 @@ run_test() {
     local expect_level="${3:-}"  # Optional: expected level substring like "ERROR"
 
     # Run the command with --no-color to get clean output
+    # Disable set -e temporarily so a non-zero exit doesn't kill the script
     local out
+    local exit_code=0
+    set +e
     out=$(printf '%s\n' "$input" | $CMD --no-color 2>&1)
-    local exit_code=$?
+    exit_code=$?
+    set -e
 
     if [[ $exit_code -ne 0 ]]; then
         echo -e "${RED}FAIL${NC} $name: command exited with $exit_code"

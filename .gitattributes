@@ -1,5 +1,2 @@
-# Ensure scripts have LF line endings and executable bit preserved
+# Ensure scripts have LF line endings
 scripts/* text=auto eol=lf
-
-# Ensure shell scripts are executable
-scripts/*.sh text=auto eol=lf
