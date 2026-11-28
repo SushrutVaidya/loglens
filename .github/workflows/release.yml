@@ -5,14 +5,48 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write            # create the release and upload the binaries
+  contents: read            # default read-only; build jobs only need this
 
 jobs:
+  validate-version:
+    name: Validate tag matches pom version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+      is-prerelease: ${{ steps.check.outputs.is-prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract pom version
+        id: extract
+        run: |
+          VERSION=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive exec:exec)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check tag matches pom version
+        id: check
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="${{ steps.extract.outputs.version }}"
+          if [[ "$TAG" == "$VERSION" ]] || [[ "$TAG" == "$VERSION-"* ]]; then
+            echo "Tag '$GITHUB_REF_NAME' matches pom version '$VERSION' (pre-release: ${TAG#$VERSION})"
+            if [[ "$TAG" == "$VERSION-"* ]]; then
+              echo "is-prerelease=true" >> $GITHUB_OUTPUT
+            else
+              echo "is-prerelease=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match pom version '$VERSION'"
+            echo "Fix: either update pom.xml to <version>$TAG</version> or push tag 'v$VERSION'"
+            exit 1
+          fi
+
   build:
     name: ${{ matrix.asset }}
     runs-on: ${{ matrix.os }}
+    needs: validate-version
     strategy:
-      fail-fast: false       # one platform failing shouldn't sink the others
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -21,12 +55,15 @@ jobs:
           - os: ubuntu-24.04-arm
             asset: loglens-linux-arm64
             binary: target/loglens
-          - os: macos-latest          # Apple Silicon
+          - os: macos-latest
             asset: loglens-macos-arm64
             binary: target/loglens
           - os: windows-latest
             asset: loglens-windows-x64.exe
             binary: target/loglens.exe
+
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +72,9 @@ jobs:
         uses: ./.github/actions/setup-graalvm
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run tests
+        run: mvn -B -ntp test
 
       - name: Build native image
         run: mvn -B -ntp -Pnative package
@@ -52,11 +92,31 @@ jobs:
           mkdir -p dist
           cp "${{ matrix.binary }}" "dist/${{ matrix.asset }}"
 
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          retention-days: 1
+
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: [validate-version, build]
+    permissions:
+      contents: write    # only this job needs write to create release
+
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: loglens-*
+          merge-multiple: false
+
       - name: Attach to the release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.asset }}
-          # A tag with a hyphen (v0.2.0-rc1) is published as a pre-release,
-          # so you can test the full matrix before cutting the real thing.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: dist/loglens-*/*
+          prerelease: ${{ needs.validate-version.outputs.is-prerelease == 'true' }}
           generate_release_notes: true
