@@ -1,0 +1,21 @@
+name: Setup GraalVM
+description: Install pinned GraalVM JDK 21 for native-image builds
+
+inputs:
+  github-token:
+    description: GitHub token to avoid API rate limits when resolving the GraalVM download
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup GraalVM
+      # Pinned: a floating "21" once shipped a native binary that silently dropped
+      # several parsers, so the exact GraalVM version is pinned on purpose and must
+      # not be changed to a floating version without a full release test.
+      uses: graalvm/setup-graalvm@v1
+      with:
+        java-version: '21.0.2'
+        distribution: graalvm-community
+        github-token: ${{ inputs.github-token }}
