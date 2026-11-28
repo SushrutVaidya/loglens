@@ -40,6 +40,16 @@ jobs:
       - name: Smoke test the jar (stats)
         run: java -jar target/loglens.jar demo/mixed.log --stats --quiet
 
+      - name: Golden stats check (jar)
+        # To regenerate: java -jar target/loglens.jar demo/mixed.log --stats --quiet --no-color > demo/expected-stats.txt
+        run: |
+          actual=$(mktemp)
+          java -jar target/loglens.jar demo/mixed.log --stats --quiet --no-color > "$actual"
+          if ! diff -u demo/expected-stats.txt "$actual"; then
+            echo "::error::Golden stats mismatch — run the regeneration command above to update"
+            exit 1
+          fi
+
   build-native:
     name: Build & Test Native (Linux x64)
     runs-on: ubuntu-latest
@@ -60,6 +70,16 @@ jobs:
 
       - name: Smoke test the binary (stats)
         run: ./target/loglens demo/mixed.log --stats --quiet
+
+      - name: Golden stats check (native)
+        # To regenerate: ./target/loglens demo/mixed.log --stats --quiet --no-color > demo/expected-stats.txt
+        run: |
+          actual=$(mktemp)
+          ./target/loglens demo/mixed.log --stats --quiet --no-color > "$actual"
+          if ! diff -u demo/expected-stats.txt "$actual"; then
+            echo "::error::Golden stats mismatch — run the regeneration command above to update"
+            exit 1
+          fi
 
   build-linux-tz:
     name: Build & Test (Linux, TZ=Pacific/Apia)

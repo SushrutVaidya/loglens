@@ -1,2 +1,5 @@
 # Ensure scripts have LF line endings
 scripts/* text=auto eol=lf
+
+# Ensure demo logs and golden files have LF line endings
+demo/* text=auto eol=lf
