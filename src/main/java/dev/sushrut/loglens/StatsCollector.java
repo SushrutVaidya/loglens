@@ -28,22 +28,38 @@ final class StatsCollector {
         String example;
         long count;
         Level worst = Level.UNKNOWN;
+        long firstSeen; // lower = seen earlier
 
-        Pattern(String template, String example) {
+        Pattern(String template, String example, long firstSeen) {
             this.template = template;
             this.example = example;
+            this.firstSeen = firstSeen;
+        }
+    }
+
+    /** Service entry with first-seen tracking for deterministic tie-breaking. */
+    private static final class ServiceEntry {
+        final String name;
+        long count;
+        final long firstSeen;
+
+        ServiceEntry(String name, long firstSeen) {
+            this.name = name;
+            this.count = 1;
+            this.firstSeen = firstSeen;
         }
     }
 
     private long total;
     private long unparsed;
     private final Map<Level, Long> byLevel = new LinkedHashMap<>();
-    private final Map<String, Long> byService = new HashMap<>();
-    private final Map<String, Pattern> problemPatterns = new HashMap<>();
+    private final Map<String, ServiceEntry> byService = new LinkedHashMap<>();
+    private final Map<String, Pattern> problemPatterns = new LinkedHashMap<>();
     /** Errors per minute bucket ("10:24"), ordered, for the spike line. */
     private final TreeMap<String, Long> errorsPerMinute = new TreeMap<>();
     private String firstTimestamp;
     private String lastTimestamp;
+    private long sequence = 0; // global insertion counter for first-seen ordering
 
     void add(LogEntry e) {
         // Continuations are part of the entry above, not separate events —
@@ -59,7 +75,14 @@ final class StatsCollector {
         byLevel.merge(e.level, 1L, Long::sum);
 
         String service = serviceOf(e);
-        if (service != null) byService.merge(service, 1L, Long::sum);
+        if (service != null) {
+            ServiceEntry se = byService.get(service);
+            if (se == null) {
+                byService.put(service, new ServiceEntry(service, sequence++));
+            } else {
+                se.count++;
+            }
+        }
 
         if (e.timestamp != null) {
             if (firstTimestamp == null) firstTimestamp = e.timestamp;
@@ -71,7 +94,7 @@ final class StatsCollector {
         if (e.level.compareTo(Level.WARN) >= 0 && e.message != null) {
             String template = MessageTemplate.collapse(e.message);
             Pattern p = problemPatterns.computeIfAbsent(template,
-                key -> new Pattern(key, e.message));
+                key -> new Pattern(key, e.message, sequence++));
             p.count++;
             if (e.level.compareTo(p.worst) > 0) {
                 p.worst = e.level;
@@ -137,17 +160,22 @@ final class StatsCollector {
 
         if (!byService.isEmpty()) {
             sb.append('\n').append(ansi.dim("by source")).append('\n');
-            byService.entrySet().stream()
-                .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+            byService.values().stream()
+                .sorted(Comparator
+                    .comparingLong((ServiceEntry se) -> -se.count)     // count descending
+                    .thenComparingLong(se -> se.firstSeen))            // first-seen ascending
                 .limit(8)
-                .forEach(en -> sb.append(String.format("  %-38s %s%n",
-                    truncate(en.getKey(), 38), ansi.bold(String.format("%,d", en.getValue())))));
+                .forEach(se -> sb.append(String.format("  %-38s %s%n",
+                    truncate(se.name, 38), ansi.bold(String.format("%,d", se.count)))));
         }
 
         if (!problemPatterns.isEmpty()) {
             sb.append('\n').append(ansi.dim("distinct problems (warn and above)")).append('\n');
             List<Pattern> ranked = new ArrayList<>(problemPatterns.values());
-            ranked.sort(Comparator.comparingLong((Pattern p) -> p.count).reversed());
+            ranked.sort(Comparator
+                .comparingLong((Pattern p) -> -p.count)                // count descending
+                .thenComparingInt(p -> -p.worst.ordinal())             // severity descending (FATAL=6, ERROR=5, WARN=4)
+                .thenComparingLong(p -> p.firstSeen));                 // first-seen ascending
             for (Pattern p : ranked.subList(0, Math.min(8, ranked.size()))) {
                 String badge = switch (p.worst) {
                     case FATAL, ERROR -> ansi.red("ERROR");
