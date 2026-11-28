@@ -337,6 +337,40 @@ class LogParserTest {
         }
 
         @Test
+        @DisplayName("cloudflared short level tokens (ERR, INF, WRN, DBG, TRC, CRIT) are parsed and stripped")
+        void cloudflaredShortLevels() {
+            // ERR -> ERROR
+            LogEntry e1 = parser.parse("2026-11-24T10:22:01+0530 h cloudflared[1]: 2026-11-24T04:52:01Z ERR connection failed");
+            assertEquals(Level.ERROR, e1.level);
+            assertEquals("connection failed", e1.message);
+
+            // INF -> INFO
+            LogEntry e2 = parser.parse("2026-11-24T10:22:02+0530 h cloudflared[1]: 2026-11-24T04:52:02Z INF connected");
+            assertEquals(Level.INFO, e2.level);
+            assertEquals("connected", e2.message);
+
+            // WRN -> WARN
+            LogEntry e3 = parser.parse("2026-11-24T10:22:03+0530 h cloudflared[1]: 2026-11-24T04:52:03Z WRN retrying");
+            assertEquals(Level.WARN, e3.level);
+            assertEquals("retrying", e3.message);
+
+            // DBG -> DEBUG
+            LogEntry e4 = parser.parse("2026-11-24T10:22:04+0530 h cloudflared[1]: 2026-11-24T04:52:04Z DBG debug info");
+            assertEquals(Level.DEBUG, e4.level);
+            assertEquals("debug info", e4.message);
+
+            // TRC -> TRACE
+            LogEntry e5 = parser.parse("2026-11-24T10:22:05+0530 h cloudflared[1]: 2026-11-24T04:52:05Z TRC trace info");
+            assertEquals(Level.TRACE, e5.level);
+            assertEquals("trace info", e5.message);
+
+            // CRIT -> FATAL
+            LogEntry e6 = parser.parse("2026-11-24T10:22:06+0530 h cloudflared[1]: 2026-11-24T04:52:06Z CRIT critical failure");
+            assertEquals(Level.FATAL, e6.level);
+            assertEquals("critical failure", e6.message);
+        }
+
+        @Test
         @DisplayName("a bare word in prose is not a severity")
         void proseIsNotSeverity() {
             assertEquals(Level.UNKNOWN, parser.parse(

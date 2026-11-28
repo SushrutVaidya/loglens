@@ -30,7 +30,7 @@ public enum Level {
         return switch (s) {
             case "TRACE", "TRC", "5" -> TRACE;
             case "DEBUG", "DBG", "4" -> DEBUG;
-            case "INFO", "INFORMATION", "NOTICE", "3" -> INFO;
+            case "INFO", "INFORMATION", "INF", "NOTICE", "3" -> INFO;
             case "WARN", "WARNING", "WRN", "2" -> WARN;
             case "ERROR", "ERR", "SEVERE", "1" -> ERROR;
             case "FATAL", "CRITICAL", "CRIT", "PANIC", "0" -> FATAL;

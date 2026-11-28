@@ -96,8 +96,10 @@ final class LogParser {
     private static final Pattern GENERIC_TS = Pattern.compile(
         "^\\[?(\\d{2,4}[/-]\\d{2}[/-]\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?Z?"
         + "(?:\\s*[+-]\\d{2}:?\\d{2})?)]?\\s+(.*)$");
+    // Matches both long forms (ERROR, WARNING) and short forms (ERR, WRN, INF, DBG, TRC, CRIT)
+    // used by cloudflared, klog, and other structured loggers. Case-insensitive.
     private static final Pattern GENERIC_LEVEL = Pattern.compile(
-        "\\b(TRACE|DEBUG|INFO|INFORMATION|NOTICE|WARN|WARNING|ERROR|SEVERE|FATAL|CRITICAL)\\b",
+        "\\b(TRACE|TRC|DEBUG|DBG|INFO|INFORMATION|INF|NOTICE|WARN|WARNING|WRN|ERROR|ERR|SEVERE|FATAL|CRITICAL|CRIT|PANIC)\\b",
         Pattern.CASE_INSENSITIVE);
 
     // journalctl -o short / short-iso / short-precise and classic syslog:
