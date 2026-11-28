@@ -3,6 +3,7 @@ package dev.sushrut.loglens;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -145,5 +146,82 @@ class StatsCollectorTest {
         while (m2.find()) probs2.add(m2.group(3));
 
         assertEquals(probs1, probs2);
+    }
+
+    @Test
+    @DisplayName("problems with different counts ordered by count desc regardless of severity")
+    void problemsDifferentCountsOrderedByCountDesc() {
+        StatsCollector stats = new StatsCollector();
+
+        // 4× WARN (lower severity, higher count) should come before 1× ERROR (higher severity, lower count)
+        for (int i = 0; i < 4; i++) {
+            stats.add(parser.parse("2026-08-15 09:00:55,000 WARN  Watch died gracefully"));
+        }
+        stats.add(parser.parse("2026-08-15 09:00:57,000 ERROR Fatal crash"));
+
+        String out = stats.render(Ansi.resolve(false));
+
+        Pattern p = Pattern.compile("^\\s+(\\d+)×\\s+(ERROR|WARN)\\s+(.+)$", Pattern.MULTILINE);
+        Matcher m = p.matcher(out);
+        var problems = new java.util.ArrayList<String>();
+        var counts = new java.util.ArrayList<Integer>();
+        while (m.find()) {
+            counts.add(Integer.parseInt(m.group(1)));
+            problems.add(m.group(2) + " " + m.group(3));
+        }
+
+        assertEquals(2, problems.size());
+        // 4× WARN first (higher count), then 1× ERROR
+        assertEquals(4, counts.get(0));
+        assertEquals("WARN Watch died gracefully", problems.get(0));
+        assertEquals(1, counts.get(1));
+        assertEquals("ERROR Fatal crash", problems.get(1));
+
+        // Also test 2×, 4×, 1× ordering
+        StatsCollector stats2 = new StatsCollector();
+        stats2.add(parser.parse("2026-08-15 09:00:57,000 ERROR one"));
+        for (int i = 0; i < 2; i++) stats2.add(parser.parse("2026-08-15 09:00:58,000 ERROR two"));
+        for (int i = 0; i < 4; i++) stats2.add(parser.parse("2026-08-15 09:00:59,000 WARN three"));
+
+        String out2 = stats2.render(Ansi.resolve(false));
+        Matcher m2 = p.matcher(out2);
+        var problems2 = new java.util.ArrayList<String>();
+        var counts2 = new java.util.ArrayList<Integer>();
+        while (m2.find()) {
+            counts2.add(Integer.parseInt(m2.group(1)));
+            problems2.add(m2.group(3));
+        }
+
+        assertEquals(3, problems2.size());
+        assertEquals(List.of(4, 2, 1), counts2);
+        assertEquals("three", problems2.get(0));   // 4× WARN
+        assertEquals("two", problems2.get(1));     // 2× ERROR
+        assertEquals("one", problems2.get(2));     // 1× ERROR
+    }
+
+    @Test
+    @DisplayName("cap keeps highest-count problems when more than 8")
+    void capKeepsHighestCountProblems() {
+        StatsCollector stats = new StatsCollector();
+
+        // Add 10 distinct problems with counts 1..10 using unique messages
+        for (int i = 1; i <= 10; i++) {
+            for (int j = 0; j < i; j++) {
+                stats.add(parser.parse("{\"timestamp\":\"2026-08-15T09:00:00Z\",\"level\":\"ERROR\",\"message\":\"problem" + i + " unique" + i + "\"}"));
+            }
+        }
+
+        String out = stats.render(Ansi.resolve(false));
+
+        Pattern p = Pattern.compile("^\\s+(\\d+)×\\s+ERROR\\s+(.+)$", Pattern.MULTILINE);
+        Matcher m = p.matcher(out);
+        var counts = new java.util.ArrayList<Integer>();
+        while (m.find()) {
+            counts.add(Integer.parseInt(m.group(1)));
+        }
+
+        // Should only show top 8 (counts 10 down to 3)
+        assertEquals(8, counts.size());
+        assertEquals(List.of(10, 9, 8, 7, 6, 5, 4, 3), counts);
     }
 }

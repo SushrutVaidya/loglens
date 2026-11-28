@@ -162,8 +162,8 @@ final class StatsCollector {
             sb.append('\n').append(ansi.dim("by source")).append('\n');
             byService.values().stream()
                 .sorted(Comparator
-                    .comparingLong((ServiceEntry se) -> se.count).reversed()
-                    .thenComparingLong(se -> se.firstSeen))
+                    .comparingLong((ServiceEntry se) -> -se.count)     // count descending
+                    .thenComparingLong(se -> se.firstSeen))            // first-seen ascending
                 .limit(8)
                 .forEach(se -> sb.append(String.format("  %-38s %s%n",
                     truncate(se.name, 38), ansi.bold(String.format("%,d", se.count)))));
@@ -173,9 +173,9 @@ final class StatsCollector {
             sb.append('\n').append(ansi.dim("distinct problems (warn and above)")).append('\n');
             List<Pattern> ranked = new ArrayList<>(problemPatterns.values());
             ranked.sort(Comparator
-                .comparingLong((Pattern p) -> p.count).reversed()
-                .thenComparingInt(p -> p.worst.ordinal()).reversed() // higher ordinal = higher severity (FATAL=6, ERROR=5, WARN=4)
-                .thenComparingLong(p -> p.firstSeen));
+                .comparingLong((Pattern p) -> -p.count)                // count descending
+                .thenComparingInt(p -> -p.worst.ordinal())             // severity descending (FATAL=6, ERROR=5, WARN=4)
+                .thenComparingLong(p -> p.firstSeen));                 // first-seen ascending
             for (Pattern p : ranked.subList(0, Math.min(8, ranked.size()))) {
                 String badge = switch (p.worst) {
                     case FATAL, ERROR -> ansi.red("ERROR");
