@@ -7,10 +7,10 @@ by source
   billing                                1
 
 distinct problems (warn and above)
-       1× ERROR  Failed to sync pod
-       1× WARN   Watch died gracefully, restarting
-       1× ERROR  payment declined
        1× ERROR  Exception in createBlockOutputStream
+       1× ERROR  Failed to sync pod
+       1× ERROR  payment declined
+       1× WARN   Watch died gracefully, restarting
 
 errors peaked at 09:00 (3 in that minute)
 ────────────────────────────────────────────────────────────────
