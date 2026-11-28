@@ -32,10 +32,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up GraalVM (JDK 21)
-        uses: graalvm/setup-graalvm@v1
+        uses: ./.github/actions/setup-graalvm
         with:
-          java-version: '21.0.2'   # pinned: a floating "21" once shipped a binary
-          distribution: graalvm-community   # that silently dropped several parsers
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build native image

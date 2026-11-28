@@ -1,0 +1,26 @@
+name: Setup GraalVM
+description: Install pinned GraalVM JDK 21 for native-image builds
+
+inputs:
+  java-version:
+    description: GraalVM Java version (pinned)
+    required: false
+    default: '21.0.2'
+  distribution:
+    description: GraalVM distribution
+    required: false
+    default: 'graalvm-community'
+  github-token:
+    description: GitHub token for GraalVM setup (optional, for private downloads)
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Setup GraalVM
+      uses: graalvm/setup-graalvm@v1
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.distribution }}
+        github-token: ${{ inputs.github-token }}
