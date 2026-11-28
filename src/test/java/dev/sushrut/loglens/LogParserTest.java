@@ -4,6 +4,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -377,6 +381,29 @@ class LogParserTest {
             assertNull(e.extras.get("MESSAGE"));
             assertNull(e.extras.get("PRIORITY"));
             assertNull(e.extras.get("SYSLOG_IDENTIFIER"));
+        }
+
+        @Test
+        @DisplayName("journal JSON timestamp uses system default zone, not hardcoded UTC")
+        void journalTimestampUsesSystemZone() {
+            // __REALTIME_TIMESTAMP = 1732447321123456 microseconds since epoch
+            // = 2024-11-24T11:22:01.123Z in UTC
+            // The parser must use ZoneId.systemDefault() so the rendered time-of-day
+            // matches the machine's clock. This test computes the expected value in
+            // the current JVM zone and asserts exact equality.
+            String json = "{\"MESSAGE\":\"test\",\"PRIORITY\":\"6\","
+                + "\"__REALTIME_TIMESTAMP\":\"1732447321123456\"}";
+            LogEntry e = parser.parse(json);
+
+            // Compute expected timestamp in the JVM's default zone
+            long micros = 1732447321123456L;
+            Instant instant = Instant.ofEpochMilli(micros / 1000);
+            String expected = instant.atZone(ZoneId.systemDefault())
+                .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+
+            assertEquals(expected, e.timestamp,
+                "Timestamp must use system default zone. If this fails under TZ=Pacific/Apia, "
+                + "the parser is hardcoding UTC or not using system zone.");
         }
 
         @Test
