@@ -1,0 +1,16 @@
+
+────────────────────────────────────────────────────────────────
+7 lines  ·  09:00:49 → 09:00:59
+ERROR 3   WARN 1   INFO 3   
+
+by source
+  billing                                1
+
+distinct problems (warn and above)
+       1× ERROR  Failed to sync pod
+       1× WARN   Watch died gracefully, restarting
+       1× ERROR  payment declined
+       1× ERROR  Exception in createBlockOutputStream
+
+errors peaked at 09:00 (3 in that minute)
+────────────────────────────────────────────────────────────────
